@@ -1,0 +1,139 @@
+\documentclass[runningheads]{llncs}
+
+% ---------------------------------------------------------------
+% Include basic ECCV package
+
+% For review-style homework output, you can use your student ID as the displayed ID.
+% \usepackage[review,year=2026,ID=314581025]{eccv}
+
+% For a non-anonymized / final-style version, use:
+\usepackage{eccv}
+
+% OPTIONAL: Easier reading on small portrait-orientation screens.
+% \usepackage[mobile]{eccv}
+
+% ---------------------------------------------------------------
+% Other packages
+
+\usepackage{eccvabbrv}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[accsupp]{axessibility}
+\usepackage{hyperref}
+\usepackage{orcidlink}
+
+\begin{document}
+
+\title{Visual Recognition Using Deep Learning Homework 1 Report}
+\titlerunning{VRDL Homework 1 Report}
+
+\author{Pao-Hua Hsu}
+\authorrunning{P.-H. Hsu}
+
+\institute{National Yang Ming Chiao Tung University, Hsinchu, Taiwan\\
+Student ID: 314581025\\
+\email{paohuah.ii14@nycu.edu.tw}}
+
+\maketitle
+
+\section{Introduction}
+\label{sec:intro}
+This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}.
+
+The foundation model I use is \texttt{timm/resnest200e.in1k}~\cite{zhang2020resnest}. My final training pipeline uses both offline and online data augmentation. In the final version, each training image is converted into two images in total: one deterministic preprocessed copy and one additional augmented copy. The offline augmentation operations include \texttt{RandomHorizontalFlip}, \texttt{ColorJitter}, \texttt{RandomAffine}, and \texttt{GaussianBlur}.
+
+During training, the online augmentation pipeline is lightweight. Each image is resized to $224 \times 224$, converted to a tensor, and normalized, and \texttt{RandomErasing} is applied with probability 0.2. In addition, \texttt{batch-level mixup/cutmix} is enabled during training to further improve generalization. \texttt{Label smoothing} is also used in the loss function. The final score is 0.93.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Data Augmentation Strategy}
+
+To improve generalization, I experimented with several combinations of offline and online data augmentation. Offline augmentation was generated before training and saved to disk, while online augmentation was applied dynamically during training. In the early versions, I tested stronger augmentation settings that combined geometric and color transformations, including \texttt{RandomHorizontalFlip}, \texttt{ColorJitter}, \texttt{RandomAffine}, and \texttt{GaussianBlur}. I also explored different placements of mixup and random erasing, trying to determine whether they should be applied in the offline stage or only during training.
+
+The augmentation settings evolved through several versions:
+\begin{itemize}
+    \item V1: online augmentation + offline augmentation.
+    \item V2: offline augmentation only.
+    \item V3: fixed 1.5x offline generation policy with plain images, same-class mixup images, and random-erasing images.
+    \item V4: final setting; 2x offline augmentation with geometric/color transforms, plus online \texttt{RandomErasing} and batch-level mixup/cutmix during training.
+\end{itemize}
+
+In earlier versions, I tested offline-only augmentation, online-only augmentation, and a combination of both. I also tried a fixed 1.5x offline policy, where each class was expanded with plain images, same-class mixup images, and random-erasing images.  But the result show that if we don't use online augmentation the model will be overfitting execpt I use a very strong offline augmentation and highly dropout rate.
+
+Because of the online augmentation is more important to prevent overfitting, the final version used in the experiment was a simpler 2x offline augmentation setting: each original training image was converted into one deterministic preprocessed copy and one additional augmented copy. In this final setting, the offline augmentation operations included \texttt{RandomHorizontalFlip}, \texttt{ColorJitter}, \texttt{RandomAffine}, and \texttt{GaussianBlur}.
+
+For online augmentation in the final setting, each image was resized to $224 \times 224$, converted to a tensor, and normalized, with \texttt{RandomErasing} applied at training time. In addition, batch-level mixup/cutmix was enabled in the training loop to further improve robustness. Label smoothing was also applied in the training loss.
+
+\subsection{Model Variants}
+\label{sec:model}
+
+The main model is \texttt{timm/resnest200e.in1k}~\cite{zhang2020resnest}. The model structure is shown in \cref{fig:resnest}. Model parameters: 68.36M. This model achieved the best overall performance among my experiments, so most augmentation tuning was conducted on this backbone. ResNeSt is an improved variant of ResNeXt, and its full paper title is \emph{Split-Attention Networks}. The key idea of ResNeSt is the split-attention block, which combines multi-path representation with channel-wise attention. In this design, the input feature maps are first divided into several cardinal groups, and each group is further split into multiple radix branches. The branch features are processed by convolution layers and then fused through split-attention before being aggregated with a residual shortcut connection. This design improves representation ability while keeping the computational overhead modest.
+
+\begin{figure}[tb]
+    \centering
+    \includegraphics[width=0.95\linewidth]{../image/ResNeSt_Structure.png}
+    \caption{Structure of the ResNeSt backbone used in this work.}
+    \label{fig:resnest}
+\end{figure}
+
+Besides ResNeSt-200e, I also tested \texttt{timm/res2next50.in1k}~\cite{gao2019res2net}. The purpose of this experiment was to compare whether a different architecture could benefit from the same augmentation strategy. Although Res2NeXt50 also worked reasonably well, its performance was lower than the best ResNeSt-200e setting, so the final submission was based on ResNeSt-200e.
+
+\subsection{Hyperparameters}
+\label{sec:hparam}
+
+I used Optuna~\cite{akiba2019optuna} to search for the best hyperparameters. Base on data augmentation setting V3, and ResNeSt-200e backbone. The best hyperparameters are as follows:
+
+\begin{itemize}
+    \item Batch size: 64
+    \item Learning rate of classifier head in stage 1: 0.0019440246330402697
+    \item Learning rate of backbone in stage 2: 6.062319554690634e-5
+    \item Learning rate of classifier head in stage 2: 0.0004223368566223033
+    \item Dropout rate: 0.6142405973299517
+    \item Weight decay: 6.506552238283957e-5
+    \item Label smoothing: 0.19013432446567302
+\end{itemize}
+
+\section{Results}
+\label{sec:results}
+
+The experimental results are summarized in \cref{tab:results}. I omit most intermediate figures here and keep only the validation scores for clearer comparison.
+
+\begin{table}[tb]
+    \caption{Summary of validation scores for different models and augmentation settings.}
+    \label{tab:results}
+    \centering
+    \small
+    \begin{tabular}{@{}lll@{}}
+        \toprule
+        Model / Version & Backbone & Score \\
+        \midrule
+        \texttt{resnest200e\_V1} & ResNeSt-200e & 0.90 \\
+        \texttt{resnest200e\_V2} & ResNeSt-200e & 0.88 \\
+        \texttt{resnest200e\_V3} & ResNeSt-200e & 0.91 \\
+        \texttt{resnest200e\_V4} & ResNeSt-200e & 0.90 \\
+        \texttt{resnest200e\_optuna\_V2} & ResNeSt-200e & 0.93 \\
+        \texttt{resnest200e\_optuna\_V3} & ResNeSt-200e & 0.93 \\
+        \texttt{res2next50\_with\_V3} & Res2NeXt-50 & 0.86 \\
+        \texttt{dinov2-giant-imagenet1k-1-layer} & DINOv2 & 0.94 \\
+        \texttt{dinov2-base-imagenet1k-1-layer} & DINOv2 & 0.95 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+For the ResNeSt-200e series, \texttt{resnest200e\_V1} uses both online and offline data augmentation and achieves a score of 0.90. \texttt{resnest200e\_V2} removes online augmentation and keeps only offline augmentation, resulting in a score of 0.88. Although the training accuracy increased to about 99\%, the validation result was worse, indicating that the model suffered from overfitting without online augmentation. \texttt{resnest200e\_V3} online and offline augmentation were both used. And the training strategy changed to 2 stages: first train the classifier head for 5 epochs, then fine-tune the whole model for 45 epochs.The result is reaching 0.91. \texttt{resnest200e\_V4} updates the augmentation design, but its performance is slightly lower than V3, with a score of 0.90.
+
+\texttt{resnest200e\_optuna\_V2} is based on \texttt{timm/resnest200e.in1k}~\cite{zhang2020resnest} and data augmentation V3 with Optuna-tuned hyperparameters~\cite{akiba2019optuna}. The model is trained in two stages: 5 epochs for classifier-head training and 45 epochs for full fine-tuning, and the detailed hyperparameter setting is provided in \cref{sec:hparam}.
+
+
+\texttt{resnest200e\_optuna\_V3} further avoids using the same augmentation strategy in both offline and online stages. The offline dataset is expanded to 2x of the original size with geometric and color augmentation, while random erasing and batch-level mixup/cutmix are kept in the online training stage. This version achieves the best performance among my ResNeSt-200e experiments, with a score of 0.93.
+
+For Res2NeXt-50, the \texttt{res2next50\_with\_V3} experiment applies the V3-style augmentation setting to \texttt{res2next50}~\cite{gao2019res2net} and achieves a score of 0.86.
+
+For other backbone experiments, \texttt{dinov2-giant-imagenet1k-1-layer} reaches 0.94, while \texttt{dinov2-base-imagenet1k-1-layer} reaches 0.95. The stronger model based on DINOv2~\cite{oquab2023dinov2} achieves better performance than the ResNeSt-200e backbone. Additionally, when I used DINOv2, the augmentation strategy was similar to the final ResNeSt-200e setting. DINOv2 achieves 0.95 quite easily with that augmentation strategy, which further confirms the effectiveness of the final augmentation design.
+
+\bibliographystyle{splncs04}
+\bibliography{main}
+
+\end{document}

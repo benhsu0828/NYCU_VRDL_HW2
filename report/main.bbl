@@ -1,0 +1,39 @@
+\begin{thebibliography}{1}
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\urlprefix}{URL }
+\providecommand{\doi}[1]{https://doi.org/#1}
+
+\bibitem{akiba2019optuna}
+Akiba, T., Sano, S., Yanase, T., Ohta, T., Koyama, M.: Optuna: A
+  next-generation hyperparameter optimization framework. In: Proceedings of the
+  25th ACM SIGKDD International Conference on Knowledge Discovery and Data
+  Mining (2019)
+
+\bibitem{eccv_guideline}
+{European Conference on Computer Vision (ECCV)}: Author guidelines for eccv
+  submission. \url{https://eccv.ecva.net/} (2026)
+
+\bibitem{gao2019res2net}
+Gao, S.H., Cheng, M.M., Zhao, K., Zhang, X.Y., Yang, M.H., Torr, P.H.S.:
+  Res2net: A new multi-scale backbone architecture. arXiv preprint
+  arXiv:1904.01169  (2019)
+
+\bibitem{lin2026course}
+Lin, Y.Y.: Selected topics in visual recognition using deep learning.
+  \url{https://docs.google.com/presentation/d/1MAi-JWLOaFQlF4VXxOKkpxdGPiTalYbnjc7Km5TpFuM/edit?usp=share_link}
+  (2026), national Yang Ming Chiao Tung University course slides, Spring 2026
+
+\bibitem{oquab2023dinov2}
+Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V.,
+  Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., Assran, M., Ballas, N.,
+  Galuba, W., Howes, R., Huang, P.Y., Li, S.W., Misra, I., Rabbat, M., Sharma,
+  V., Synnaeve, G., Xu, H., J{\'e}gou, H., Mairal, J., Bojanowski, P., Joulin,
+  A.: Dinov2: Learning robust visual features without supervision. arXiv
+  preprint arXiv:2304.07193  (2023)
+
+\bibitem{zhang2020resnest}
+Zhang, H., Wu, C., Zhang, Z., Zhu, Y., Lin, H., Sun, Y., He, T., Mueller, J.,
+  Manmatha, R., Li, M., Smola, A.: Resnest: Split-attention networks. arXiv
+  preprint arXiv:2004.08955  (2020)
+
+\end{thebibliography}
