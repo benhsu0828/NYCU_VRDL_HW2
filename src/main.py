@@ -501,6 +501,11 @@ class HungarianMatcher(nn.Module):
         out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)
         out_bbox = outputs["pred_boxes"].flatten(0, 1)
 
+        if not torch.isfinite(out_prob).all():
+            raise RuntimeError("HungarianMatcher received non-finite class probabilities from model outputs.")
+        if not torch.isfinite(out_bbox).all():
+            raise RuntimeError("HungarianMatcher received non-finite predicted boxes from model outputs.")
+
         sizes = [len(target["labels"]) for target in targets]
         if sum(sizes) == 0:
             return [
@@ -528,6 +533,12 @@ class HungarianMatcher(nn.Module):
             + self.cost_bbox * cost_bbox
             + self.cost_giou * cost_giou
         )
+        if not torch.isfinite(total_cost).all():
+            invalid_count = int((~torch.isfinite(total_cost)).sum().item())
+            raise RuntimeError(
+                f"HungarianMatcher produced a cost matrix with {invalid_count} non-finite entries. "
+                "This usually means the model outputs or targets became numerically unstable."
+            )
         total_cost = total_cost.view(bs, num_queries, -1).cpu()
 
         indices: list[tuple[Tensor, Tensor]] = []
@@ -717,8 +728,9 @@ def train_one_epoch(
     criterion.train()
 
     running = defaultdict(float)
+    skipped_batches = 0
     progress = tqdm(dataloader, desc=f"train {epoch:03d}", leave=False)
-    for images, masks, targets in progress:
+    for batch_idx, (images, masks, targets) in enumerate(progress, start=1):
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
         targets = move_targets_to_device(targets, device)
@@ -726,11 +738,41 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=amp_enabled):
             outputs = model(images, masks)
+            if not torch.isfinite(outputs["pred_logits"]).all():
+                print(
+                    f"Skipping train batch {batch_idx} in epoch {epoch:03d}: "
+                    "model produced non-finite logits."
+                )
+                skipped_batches += 1
+                continue
+            if not torch.isfinite(outputs["pred_boxes"]).all():
+                print(
+                    f"Skipping train batch {batch_idx} in epoch {epoch:03d}: "
+                    "model produced non-finite boxes."
+                )
+                skipped_batches += 1
+                continue
             losses = criterion(outputs, targets)
+        if not all(torch.isfinite(value).all() for value in losses.values()):
+            print(
+                f"Skipping train batch {batch_idx} in epoch {epoch:03d}: "
+                "criterion produced non-finite losses."
+            )
+            skipped_batches += 1
+            continue
         scaler.scale(losses["loss_total"]).backward()
         if clip_max_norm > 0.0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+            if not torch.isfinite(grad_norm):
+                print(
+                    f"Skipping optimizer step for train batch {batch_idx} in epoch {epoch:03d}: "
+                    "gradient norm became non-finite."
+                )
+                optimizer.zero_grad(set_to_none=True)
+                scaler.update()
+                skipped_batches += 1
+                continue
         scaler.step(optimizer)
         scaler.update()
 
@@ -738,8 +780,10 @@ def train_one_epoch(
             running[key] += float(value.detach().cpu())
         progress.set_postfix(loss=f"{losses['loss_total'].item():.4f}")
 
-    num_batches = max(len(dataloader), 1)
-    return {key: value / num_batches for key, value in running.items()}
+    num_batches = max(len(dataloader) - skipped_batches, 1)
+    stats = {key: value / num_batches for key, value in running.items()}
+    stats["skipped_batches"] = float(skipped_batches)
+    return stats
 
 
 @torch.no_grad()
