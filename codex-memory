@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Project-local Codex memory helper.
+
+This command keeps a repo-local `.codex` file up to date so new sessions can
+quickly understand the current project state.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+MEMORY_FILE = ROOT / ".codex"
+TITLE = "# Codex Project Memory"
+SECTION_ORDER = [
+    "Project Summary",
+    "Current Status",
+    "Methods Tried",
+    "Next Steps",
+    "Session Handoff",
+    "Update Log",
+]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def default_sections() -> dict[str, str]:
+    return {
+        "Project Summary": "待補充。",
+        "Current Status": "- 待補充。",
+        "Methods Tried": "- 待補充。",
+        "Next Steps": "- 待補充。",
+        "Session Handoff": "- 新的 Codex session 開始前，先讀取 repo 根目錄的 `.codex`。",
+        "Update Log": "",
+    }
+
+
+def parse_memory(text: str) -> tuple[str, str, dict[str, str]]:
+    project_name = ROOT.name
+    last_updated = ""
+    sections = default_sections()
+
+    if not text.strip():
+        return project_name, last_updated, sections
+
+    current_section: str | None = None
+    section_lines: dict[str, list[str]] = {name: [] for name in SECTION_ORDER}
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("Project: "):
+            project_name = line.removeprefix("Project: ").strip() or project_name
+            continue
+        if line.startswith("Last updated: "):
+            last_updated = line.removeprefix("Last updated: ").strip()
+            continue
+        if line.startswith("## "):
+            heading = line[3:].strip()
+            current_section = heading if heading in section_lines else None
+            continue
+        if current_section is not None:
+            section_lines[current_section].append(line)
+
+    for section_name, lines in section_lines.items():
+        content = "\n".join(lines).strip()
+        if content:
+            sections[section_name] = content
+
+    return project_name, last_updated, sections
+
+
+def format_bullets(items: list[str], fallback: str) -> str:
+    if not items:
+        return fallback
+    return "\n".join(f"- {item.strip()}" for item in items if item.strip())
+
+
+def render_memory(project_name: str, last_updated: str, sections: dict[str, str]) -> str:
+    lines = [
+        TITLE,
+        "",
+        "此檔案是此專案的長期記憶。新的 Codex session 開始時，應先閱讀這份檔案。",
+        "每次模型、方法、報告重點或實驗結論有變動時，都應更新這份檔案。",
+        "",
+        f"Project: {project_name}",
+        f"Last updated: {last_updated}",
+        "",
+        "## How To Use",
+        "- 讀取目前專案狀態：`./codex-memory show`",
+        "- 更新專案狀態：`./codex-memory update ...`",
+        "- 新的 session 開始時，先閱讀 repo 根目錄的 `.codex`。",
+        "",
+    ]
+
+    for section_name in SECTION_ORDER:
+        lines.append(f"## {section_name}")
+        content = sections.get(section_name, "").strip() or "待補充。"
+        lines.append(content)
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def append_log(existing_log: str, entry: str) -> str:
+    new_line = f"- {entry.strip()}"
+    existing_lines = [line for line in existing_log.splitlines() if line.strip()]
+    return "\n".join([new_line, *existing_lines]).strip()
+
+
+def load_memory() -> tuple[str, str, dict[str, str]]:
+    if not MEMORY_FILE.exists():
+        return ROOT.name, "", default_sections()
+    return parse_memory(MEMORY_FILE.read_text(encoding="utf-8"))
+
+
+def cmd_show(_: argparse.Namespace) -> int:
+    project_name, last_updated, sections = load_memory()
+    if not last_updated:
+        last_updated = now_iso()
+    print(render_memory(project_name, last_updated, sections), end="")
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    project_name, _, sections = load_memory()
+    touched_sections: list[str] = []
+
+    if args.project:
+        project_name = args.project.strip()
+
+    if args.summary is not None:
+        sections["Project Summary"] = args.summary.strip() or "待補充。"
+        touched_sections.append("Project Summary")
+    if args.status:
+        sections["Current Status"] = format_bullets(args.status, "- 待補充。")
+        touched_sections.append("Current Status")
+    if args.tried:
+        sections["Methods Tried"] = format_bullets(args.tried, "- 待補充。")
+        touched_sections.append("Methods Tried")
+    if args.next:
+        sections["Next Steps"] = format_bullets(args.next, "- 待補充。")
+        touched_sections.append("Next Steps")
+    if args.handoff:
+        sections["Session Handoff"] = format_bullets(args.handoff, "- 待補充。")
+        touched_sections.append("Session Handoff")
+
+    log_entry = args.log.strip() if args.log else ""
+    if not log_entry:
+        if touched_sections:
+            touched = ", ".join(touched_sections)
+            log_entry = f"{now_iso()}: updated {touched}."
+        else:
+            log_entry = f"{now_iso()}: refreshed project memory."
+
+    sections["Update Log"] = append_log(sections.get("Update Log", ""), log_entry)
+    rendered = render_memory(project_name, now_iso(), sections)
+    MEMORY_FILE.write_text(rendered, encoding="utf-8")
+    print(f"Updated {MEMORY_FILE}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Maintain repo-local Codex project memory in `.codex`.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    show_parser = subparsers.add_parser("show", help="Print the current `.codex` project memory.")
+    show_parser.set_defaults(func=cmd_show)
+
+    update_parser = subparsers.add_parser("update", help="Update the `.codex` project memory.")
+    update_parser.add_argument("--project", type=str, help="Project name shown in `.codex`.")
+    update_parser.add_argument("--summary", type=str, help="Short project summary.")
+    update_parser.add_argument("--status", action="append", default=[], help="Current status bullet. Repeatable.")
+    update_parser.add_argument("--tried", action="append", default=[], help="Method already tried. Repeatable.")
+    update_parser.add_argument("--next", action="append", default=[], help="Next-step bullet. Repeatable.")
+    update_parser.add_argument("--handoff", action="append", default=[], help="Handoff note for future sessions. Repeatable.")
+    update_parser.add_argument("--log", type=str, default="", help="Optional update-log entry.")
+    update_parser.set_defaults(func=cmd_update)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

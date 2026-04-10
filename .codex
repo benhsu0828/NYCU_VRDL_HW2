@@ -1,0 +1,43 @@
+# Codex Project Memory
+
+此檔案是此專案的長期記憶。新的 Codex session 開始時，應先閱讀這份檔案。
+每次模型、方法、報告重點或實驗結論有變動時，都應更新這份檔案。
+
+Project: NYCU_VRDL_HW2
+Last updated: 2026-04-09 00:36:48 CST
+
+## How To Use
+- 讀取目前專案狀態：`./codex-memory show`
+- 更新專案狀態：`./codex-memory update ...`
+- 新的 session 開始時，先閱讀 repo 根目錄的 `.codex`。
+
+## Project Summary
+NYCU VRDL HW2 目前以數字偵測為主，主線在比較 baseline DETR 與 DN-Deformable DETR，並同步維護報告 report/main.tex。
+
+## Current Status
+- baseline 主線檔案是 src/main.py。
+- baseline 特徵融合已改為標準 FPN：1x1 conv + upsample + add + 3x3 conv，最後只把最高解析度 fused feature map 送入 vanilla DETR encoder。
+- baseline 目前仍保留較強的分類 supervision，包括 class-balanced CE、可調的 classification loss coefficient，以及 label smoothing。
+- DN-DETR 主線檔案是 src/main_dn_deformable.py，目前結果仍明顯落後 baseline，問題偏向分類不穩定。
+- report/main.tex 已經更新成描述 FPN 融合版本，但表格中的 Baseline + FPN Fusion 分數仍是 tbd。
+- data augmentation 尚未正式加入主線實驗，後續才會補。
+
+## Methods Tried
+- baseline 曾嘗試把多個 fused feature levels 全部展平成 transformer encoder tokens，並加入 level embedding。
+- 上述多尺度 token 串接版本雖然能讓 transformer 同時看到多尺度資訊，但 vanilla DETR 的 full attention 成本過高，訓練時間顯著增加。
+- 因此 baseline 已改回 FPN 式多尺度融合，讓多尺度資訊主要在 backbone 路徑整合，而不是直接擴大 transformer token 數量。
+- DN-Deformable DETR 已導入作為對照組，但目前驗證表現很差，尚未完成穩定調參。
+
+## Next Steps
+- 重新訓練 baseline 的 FPN 版本，更新 Baseline + FPN Fusion 的驗證分數。
+- 之後加入 data augmentation，觀察分類與小物件偵測是否提升。
+- 視時間決定是否繼續調整 DN-DETR，或以 baseline 為主完成作業報告。
+
+## Session Handoff
+- 新的 session 開始時，先讀取 repo 根目錄的 .codex，再決定接下來的工作。
+- 編輯報告時，使用者偏好把重要的原始實驗筆記保留下來；若不放正文，至少用註解保留，而不是直接刪掉。
+- 目前最重要的工作檔案通常是 src/main.py、src/main_dn_deformable.py、report/main.tex、README.md。
+- 這份 .codex 就是此專案的長期記憶，之後模型版本、方法嘗試、報告狀態有變動時都要更新。
+
+## Update Log
+- initialized repo-local project memory for this homework and recorded the current baseline/DN-DETR status.

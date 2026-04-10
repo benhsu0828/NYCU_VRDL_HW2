@@ -1,0 +1,11 @@
+*.gz
+*.pt
+nycu-hw2-data/
+.docker-home/
+.docker-python/
+diagnostics/
+R50_v2/
+tensorboard*/
+*.json
+checkpoints/
+__pycache__/

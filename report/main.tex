@@ -39,61 +39,38 @@ Student ID: 314581025\\
 
 \section{Introduction}
 \label{sec:intro}
-This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}.
-
-The foundation model I use is \texttt{timm/resnest200e.in1k}~\cite{zhang2020resnest}. My final training pipeline uses both offline and online data augmentation. In the final version, each training image is converted into two images in total: one deterministic preprocessed copy and one additional augmented copy. The offline augmentation operations include \texttt{RandomHorizontalFlip}, \texttt{ColorJitter}, \texttt{RandomAffine}, and \texttt{GaussianBlur}.
-
-During training, the online augmentation pipeline is lightweight. Each image is resized to $224 \times 224$, converted to a tensor, and normalized, and \texttt{RandomErasing} is applied with probability 0.2. In addition, \texttt{batch-level mixup/cutmix} is enabled during training to further improve generalization. \texttt{Label smoothing} is also used in the loss function. The final score is 0.93.
+This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}. The current work focuses on object detection for digit recognition, using DETR-style models as the main direction.
 
 \section{Method}
 \label{sec:method}
 
+% baseline | thr=0.6 | top_k=4 | nms=0.3 | mAP=0.37859099224046894 | AP50=0.7989752286606853 | avg_pred=2.164 | class_error=0.0917 | loss_ce=0.2819 | loss_bbox=0.0593 | loss_giou=0.2666
+% dn_detr | thr=0.2 | top_k=4 | nms=0.3 | mAP=0.002142713475655843 | AP50=0.007419773879386101 | avg_pred=1.525 | class_error=78.3956 | loss_ce=0.5094 | loss_bbox=0.0878 | loss_giou=0.3605
+
 \subsection{Data Augmentation Strategy}
+目前的 baseline 與 DN-DETR 實驗尚未正式加入 data augmentation，因此本報告中的結果主要反映模型架構、matching 與 loss 設計對效能的影響，而不是資料增強後的最終上限。後續我預計補上資料增強流程，例如亮度與對比抖動、縮放與平移，以及針對類別不平衡問題設計的 class-balanced augmentation，進一步觀察其對分類穩定度與小物件辨識能力的幫助。
 
-To improve generalization, I experimented with several combinations of offline and online data augmentation. Offline augmentation was generated before training and saved to disk, while online augmentation was applied dynamically during training. In the early versions, I tested stronger augmentation settings that combined geometric and color transformations, including \texttt{RandomHorizontalFlip}, \texttt{ColorJitter}, \texttt{RandomAffine}, and \texttt{GaussianBlur}. I also explored different placements of mixup and random erasing, trying to determine whether they should be applied in the offline stage or only during training.
-
-The augmentation settings evolved through several versions:
-\begin{itemize}
-    \item V1: online augmentation + offline augmentation.
-    \item V2: offline augmentation only.
-    \item V3: fixed 1.5x offline generation policy with plain images, same-class mixup images, and random-erasing images.
-    \item V4: final setting; 2x offline augmentation with geometric/color transforms, plus online \texttt{RandomErasing} and batch-level mixup/cutmix during training.
-\end{itemize}
-
-In earlier versions, I tested offline-only augmentation, online-only augmentation, and a combination of both. I also tried a fixed 1.5x offline policy, where each class was expanded with plain images, same-class mixup images, and random-erasing images.  But the result show that if we don't use online augmentation the model will be overfitting execpt I use a very strong offline augmentation and highly dropout rate.
-
-Because of the online augmentation is more important to prevent overfitting, the final version used in the experiment was a simpler 2x offline augmentation setting: each original training image was converted into one deterministic preprocessed copy and one additional augmented copy. In this final setting, the offline augmentation operations included \texttt{RandomHorizontalFlip}, \texttt{ColorJitter}, \texttt{RandomAffine}, and \texttt{GaussianBlur}.
-
-For online augmentation in the final setting, each image was resized to $224 \times 224$, converted to a tensor, and normalized, with \texttt{RandomErasing} applied at training time. In addition, batch-level mixup/cutmix was enabled in the training loop to further improve robustness. Label smoothing was also applied in the training loss.
-
+針對資料中類別分佈不均與分類表現偏弱的問題，baseline 也加入了較強的 classification supervision，包括 class-balanced cross-entropy weight、可調整的 classification loss coefficient，以及 label smoothing。這些改動的目標，是避免模型過度偏向 bounding box regression，而忽略了數字類別本身的辨識。目前這些改動已經在 baseline 上進行測試，後續會再加入到 DN-DETR 的實驗中，觀察是否能改善其分類不穩定的問題。
 \subsection{Model Variants}
 \label{sec:model}
+本次實作主要比較兩個方向：自建的 baseline DETR，以及後續嘗試導入的 DN-DETR。
 
-The main model is \texttt{timm/resnest200e.in1k}~\cite{zhang2020resnest}. The model structure is shown in \cref{fig:resnest}. Model parameters: 68.36M. This model achieved the best overall performance among my experiments, so most augmentation tuning was conducted on this backbone. ResNeSt is an improved variant of ResNeXt, and its full paper title is \emph{Split-Attention Networks}. The key idea of ResNeSt is the split-attention block, which combines multi-path representation with channel-wise attention. In this design, the input feature maps are first divided into several cardinal groups, and each group is further split into multiple radix branches. The branch features are processed by convolution layers and then fused through split-attention before being aggregated with a residual shortcut connection. This design improves representation ability while keeping the computational overhead modest.
+一開始直接引入DN-DETR來使用，結果預測出的分數很差，跟baseline相比才發現不只有框預測錯誤，可以從AP50看出，大多數時候是有抓到東西的，但是精準度還是不構，並且分類非常差，class_error 高到接近沒學會，avg_pred=1.525 並不算完全沒輸出，但輸出的東西大多是錯的。
 
-\begin{figure}[tb]
-    \centering
-    \includegraphics[width=0.95\linewidth]{../image/ResNeSt_Structure.png}
-    \caption{Structure of the ResNeSt backbone used in this work.}
-    \label{fig:resnest}
-\end{figure}
 
-Besides ResNeSt-200e, I also tested \texttt{timm/res2next50.in1k}~\cite{gao2019res2net}. The purpose of this experiment was to compare whether a different architecture could benefit from the same augmentation strategy. Although Res2NeXt50 also worked reasonably well, its performance was lower than the best ResNeSt-200e setting, so the final submission was based on ResNeSt-200e.
+在 baseline中，我嘗試改版成像是DN-DETR一樣讓transformer可以得到多維度的特徵，我額外將三個 fused feature levels 全部展平成 transformer encoder tokens，而不是只取單一最高解析度特徵圖送入 encoder。具體而言，每個尺度的特徵圖都會先搭配對應的 mask 與 sine positional embedding，再加入一個 learnable level embedding，用來告訴 transformer 該 token 來自哪一個 feature level。最後再將不同尺度的 tokens 串接成單一序列送入 encoder。這樣的設計可以讓 decoder query 同時存取高解析度的局部細節與低解析度的高階語意，理論上對小型數字目標的分類與定位都有幫助。但是這樣讓我的訓練時間大幅度增加。
+
+所以後來將 backbone 輸出的多尺度特徵改為標準 FPN 風格的融合方式。首先，對每一層 feature map 使用 $1 \times 1$ convolution 將通道數對齊到相同維度；接著，將較深層的特徵圖上採樣到較高解析度後，與對應的淺層特徵直接相加；最後，再接上一個 $3 \times 3$ convolution 對融合後的特徵做平滑。這樣的設計可以在維持計算成本相對穩定的情況下，同時保留深層語意資訊與高解析度細節，對小型數字目標較有幫助。
+
+與先前直接將多個 feature levels 全部展平成 transformer tokens 的做法相比，FPN 式融合不需要讓 vanilla transformer 對所有尺度的 token 做 full attention，因此訓練時間顯著較短，也更適合作為目前 baseline 的主線設計。融合完成後，模型僅將最高解析度的 fused feature map 送入 encoder，讓 backbone 端受益於多尺度資訊，但避免 transformer 計算量大幅增加。
+
+相較之下，DN-DETR 雖然理論上具有更快收斂與更穩定 training signal 的優勢，但我目前直接套用後的結果不理想。從驗證結果來看，模型並非完全沒有輸出框，而是常常能偵測到物體存在，但在分類上明顯失敗，導致整體 mAP 與 AP50 都遠低於 baseline。因此，現階段 baseline 仍是較穩定且可持續改進的主線模型。
+
 
 \subsection{Hyperparameters}
 \label{sec:hparam}
 
-I used Optuna~\cite{akiba2019optuna} to search for the best hyperparameters. Base on data augmentation setting V3, and ResNeSt-200e backbone. The best hyperparameters are as follows:
-
-\begin{itemize}
-    \item Batch size: 64
-    \item Learning rate of classifier head in stage 1: 0.0019440246330402697
-    \item Learning rate of backbone in stage 2: 6.062319554690634e-5
-    \item Learning rate of classifier head in stage 2: 0.0004223368566223033
-    \item Dropout rate: 0.6142405973299517
-    \item Weight decay: 6.506552238283957e-5
-    \item Label smoothing: 0.19013432446567302
-\end{itemize}
+目前 baseline 的主要訓練設定為 80 個 epochs、主幹學習率 $5 \times 10^{-5}$、backbone 學習率 $5 \times 10^{-6}$、weight decay 為 $10^{-4}$，並在第 60 個 epoch 後將 learning rate 乘上 0.1。除此之外，為了穩定訓練，我也使用 gradient clipping，並搭配 pretrained DETR checkpoint 作為 warm start。由於目前仍在以 baseline 架構調整為主，本報告尚未使用完整的 Optuna 自動化搜尋結果作為最終設定，後續若加入 data augmentation 與更多模型變體，會再統一進行超參數調整。
 
 \section{Results}
 \label{sec:results}
@@ -101,37 +78,25 @@ I used Optuna~\cite{akiba2019optuna} to search for the best hyperparameters. Bas
 The experimental results are summarized in \cref{tab:results}. I omit most intermediate figures here and keep only the validation scores for clearer comparison.
 
 \begin{table}[tb]
-    \caption{Summary of validation scores for different models and augmentation settings.}
+    \caption{Summary of validation scores for different model variants.}
     \label{tab:results}
     \centering
     \small
-    \begin{tabular}{@{}lll@{}}
+    \begin{tabular}{@{}llll@{}}
         \toprule
-        Model / Version & Backbone & Score \\
+        Model / Version & Backbone / Setting & Description & Score \\
         \midrule
-        \texttt{resnest200e\_V1} & ResNeSt-200e & 0.90 \\
-        \texttt{resnest200e\_V2} & ResNeSt-200e & 0.88 \\
-        \texttt{resnest200e\_V3} & ResNeSt-200e & 0.91 \\
-        \texttt{resnest200e\_V4} & ResNeSt-200e & 0.90 \\
-        \texttt{resnest200e\_optuna\_V2} & ResNeSt-200e & 0.93 \\
-        \texttt{resnest200e\_optuna\_V3} & ResNeSt-200e & 0.93 \\
-        \texttt{res2next50\_with\_V3} & Res2NeXt-50 & 0.86 \\
-        \texttt{dinov2-giant-imagenet1k-1-layer} & DINOv2 & 0.94 \\
-        \texttt{dinov2-base-imagenet1k-1-layer} & DINOv2 & 0.95 \\
+        \texttt{Baseline} & DETR + ResNet-50 & single-scale baseline setting & 0.3786 \\
+        \texttt{Baseline + FPN Fusion} & DETR + ResNet-50 & $1 \times 1$ conv + upsample + add + $3 \times 3$ conv smoothing & tbd \\
+        \texttt{DN-DETR} & DN-DETR setting V1 & direct imported setting, classification unstable & 0.0021 \\
         \bottomrule
     \end{tabular}
 \end{table}
 
-For the ResNeSt-200e series, \texttt{resnest200e\_V1} uses both online and offline data augmentation and achieves a score of 0.90. \texttt{resnest200e\_V2} removes online augmentation and keeps only offline augmentation, resulting in a score of 0.88. Although the training accuracy increased to about 99\%, the validation result was worse, indicating that the model suffered from overfitting without online augmentation. \texttt{resnest200e\_V3} online and offline augmentation were both used. And the training strategy changed to 2 stages: first train the classifier head for 5 epochs, then fine-tune the whole model for 45 epochs.The result is reaching 0.91. \texttt{resnest200e\_V4} updates the augmentation design, but its performance is slightly lower than V3, with a score of 0.90.
+從目前的結果來看，baseline DETR 明顯優於直接導入的 DN-DETR。baseline 在 validation 上可達到 mAP $= 0.3786$、AP50 $= 0.7990$，代表模型大多數情況下已能抓到數字位置，且整體偵測品質尚可。相對地，DN-DETR 目前只有 mAP $= 0.0021$、AP50 $= 0.0074$，顯示目前設定下幾乎無法有效完成偵測任務。
 
-\texttt{resnest200e\_optuna\_V2} is based on \texttt{timm/resnest200e.in1k}~\cite{zhang2020resnest} and data augmentation V3 with Optuna-tuned hyperparameters~\cite{akiba2019optuna}. The model is trained in two stages: 5 epochs for classifier-head training and 45 epochs for full fine-tuning, and the detailed hyperparameter setting is provided in \cref{sec:hparam}.
+進一步觀察 loss 與診斷指標，可以發現 DN-DETR 的問題不只在框的位置回歸，而是分類學習幾乎沒有建立起來。雖然平均每張影像仍會輸出部分預測框，但這些框大多類別不正確，導致整體指標非常差。因此，本次後續改進主要回到 baseline 上，先針對 FPN 式多尺度特徵融合與分類 supervision 做加強，再評估是否重新調整 DN-DETR 的訓練流程。
 
-
-\texttt{resnest200e\_optuna\_V3} further avoids using the same augmentation strategy in both offline and online stages. The offline dataset is expanded to 2x of the original size with geometric and color augmentation, while random erasing and batch-level mixup/cutmix are kept in the online training stage. This version achieves the best performance among my ResNeSt-200e experiments, with a score of 0.93.
-
-For Res2NeXt-50, the \texttt{res2next50\_with\_V3} experiment applies the V3-style augmentation setting to \texttt{res2next50}~\cite{gao2019res2net} and achieves a score of 0.86.
-
-For other backbone experiments, \texttt{dinov2-giant-imagenet1k-1-layer} reaches 0.94, while \texttt{dinov2-base-imagenet1k-1-layer} reaches 0.95. The stronger model based on DINOv2~\cite{oquab2023dinov2} achieves better performance than the ResNeSt-200e backbone. Additionally, when I used DINOv2, the augmentation strategy was similar to the final ResNeSt-200e setting. DINOv2 achieves 0.95 quite easily with that augmentation strategy, which further confirms the effectiveness of the final augmentation design.
 
 \bibliographystyle{splncs04}
 \bibliography{main}

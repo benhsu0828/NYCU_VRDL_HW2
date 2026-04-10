@@ -1,0 +1,16 @@
+.git
+.docker-home
+.docker-python
+__pycache__
+*.pt
+*.pth
+*.pyc
+checkpoints
+nycu-hw2-data
+nycu-hw2-data.tar.gz
+tensorboard_baseline
+tensorboard_dn_deformable
+pred.json
+pred_baseline.json
+pred_dn_deformable.json
+DN-DETR/.git
