@@ -127,6 +127,11 @@ def add_model_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--eval-every-epoch", action="store_true")
     parser.add_argument("--predict-after-train", action="store_true")
     parser.add_argument("--amp", action="store_true")
+    parser.add_argument(
+        "--freeze-transformer",
+        action="store_true",
+        help="Freeze the DN-DETR transformer block during training while keeping other modules trainable.",
+    )
 
     parser.add_argument("--set-cost-class", type=float, default=2.0)
     parser.add_argument("--set-cost-bbox", type=float, default=5.0)
@@ -260,6 +265,16 @@ def build_test_dataloader(args: argparse.Namespace) -> DataLoader:
 def build_model(args: argparse.Namespace):
     require_dn_detr()
     return build_dab_deformable_detr(args)
+
+
+def apply_training_freezes(model: torch.nn.Module, args: argparse.Namespace) -> list[str]:
+    frozen_modules: list[str] = []
+    if args.freeze_transformer:
+        for name, parameter in model.named_parameters():
+            if name.startswith("transformer."):
+                parameter.requires_grad_(False)
+        frozen_modules.append("transformer")
+    return frozen_modules
 
 
 def move_targets_to_device(targets: list[dict[str, torch.Tensor]], device: torch.device) -> list[dict[str, torch.Tensor]]:
@@ -490,12 +505,15 @@ def run_train(args: argparse.Namespace) -> None:
     model, criterion, _ = build_model(args)
     model = model.to(device)
     criterion = criterion.to(device)
+    frozen_modules = apply_training_freezes(model, args)
 
     total_params, trainable_params = baseline.count_parameters(model)
     print(
         f"Model parameters: total={baseline.format_param_count(total_params)} "
         f"trainable={baseline.format_param_count(trainable_params)}"
     )
+    if frozen_modules:
+        print(f"Frozen modules: {', '.join(frozen_modules)}")
 
     optimizer = AdamW(
         [

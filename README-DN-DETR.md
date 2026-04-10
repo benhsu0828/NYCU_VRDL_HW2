@@ -90,18 +90,6 @@ Check the compiled operator:
 ./docker/run_dn_detr.sh python -c "import torch; import MultiScaleDeformableAttention; print('ok')"
 ```
 
-## Train
-
-```bash
-./docker/run_dn_detr.sh python src/main_dn_deformable.py train \
-  --tensorboard \
-  --eval-every-epoch \
-  --checkpoint-dir checkpoints/dn_deformable \
-  --tensorboard-dir tensorboard_dn_deformable/run1
-```
-
-`--amp` is optional. In the current DN-DETR custom operator setup, mixed precision may still trigger dtype mismatch errors, so the default recommendation here is to train without `--amp` first.
-
 ## Train and Predict
 
 ```bash
@@ -109,9 +97,10 @@ Check the compiled operator:
   --tensorboard \
   --eval-every-epoch \
   --predict-after-train \
-  --checkpoint-dir checkpoints/dn_deformable_onPretrain \
-  --tensorboard-dir tensorboard_dn_deformable/run2 \
-  --output pred_dn_deformable_onPretrain.json
+  --freeze-transformer \
+  --checkpoint-dir checkpoints/dn_deformable_freeze_transformer \
+  --tensorboard-dir tensorboard_dn_deformable/freeze_transformer \
+  --output pred_dn_deformable_freeze_transformer.json
 ```
 
 ## Predict
