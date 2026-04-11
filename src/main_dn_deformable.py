@@ -61,7 +61,7 @@ def require_dn_detr() -> None:
 
 def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--image-size", type=int, default=384)
+    parser.add_argument("--image-size", type=int, default=720)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--device", type=str, default="")
@@ -338,7 +338,7 @@ def generate_predictions(
     raw_top_scores: list[float] = []
 
     for samples, targets in dataloader:
-        samples = samples.to(device, non_blocking=True)
+        samples = samples.to(device)
         outputs = forward_for_eval(model, samples, args)
 
         pred_logits = outputs["pred_logits"].sigmoid()
@@ -569,7 +569,7 @@ def run_train(args: argparse.Namespace) -> None:
             valid_stats = evaluate_loss(model, criterion, valid_loader, device, args)
             eval_stats: dict[str, float] | None = None
             if args.eval_every_epoch:
-                predictions = generate_predictions(model, valid_loader, device, args)
+                predictions, _ = generate_predictions(model, valid_loader, device, args)
                 eval_stats = baseline.maybe_run_coco_eval(args.valid_json, predictions)
             scheduler.step()
 

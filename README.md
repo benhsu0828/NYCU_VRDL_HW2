@@ -50,7 +50,7 @@ If you do not already have a trained checkpoint, use `train` first. You can also
   --ce-loss-coef 2.0 \
   --eos-coef 0.1 \
   --label-smoothing 0.05 \
-  --amp \
+  --image-size 720 \
   --freeze-transformer \
   --early-stop-patience 10 \
   --checkpoint-dir checkpoints/detr_onPretrain \

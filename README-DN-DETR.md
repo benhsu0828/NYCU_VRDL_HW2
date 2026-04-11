@@ -97,7 +97,6 @@ Check the compiled operator:
   --tensorboard \
   --eval-every-epoch \
   --predict-after-train \
-  --freeze-transformer \
   --checkpoint-dir checkpoints/dn_deformable_freeze_transformer \
   --tensorboard-dir tensorboard_dn_deformable/freeze_transformer \
   --output pred_dn_deformable_freeze_transformer.json
