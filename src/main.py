@@ -1405,7 +1405,7 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--amp", action="store_true", help="Enable mixed precision on CUDA for faster training/inference.")
     parser.add_argument("--tensorboard", action="store_true")
-    parser.add_argument("--tensorboard-dir", type=Path, default=PROJECT_ROOT / "tensorboard_baseline" / "run_freeze_transformer")
+    parser.add_argument("--tensorboard-dir", type=Path, default=PROJECT_ROOT / "tensorboard_baseline" / "canvas_offline")
 
     parser.add_argument("--num-queries", type=int, default=100)
     parser.add_argument("--hidden-dim", type=int, default=256)

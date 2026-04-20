@@ -39,40 +39,68 @@ Student ID: 314581025\\
 
 \section{Introduction}
 \label{sec:intro}
-This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}. The current work focuses on object detection for digit recognition, using DETR-style models as the main direction.
+This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}. The task is digit object detection, and my experiments focus on two DETR-style directions: a custom baseline DETR and DN-Deformable-DETR.
+
+On the model side, I evaluate a baseline DETR pipeline (including FPN-style feature fusion variants) and a DN-DETR pipeline with denoising training. On the data side, I test both the original training set and an offline canvas-augmented version (random paste on enlarged canvas with Gaussian-noise background), then analyze whether this augmentation helps both models consistently.
+
+From the current experiments, the most stable setup is still the baseline DETR family. DN-DETR can be sensitive to preprocessing and hyperparameters, and the canvas-style strong augmentation does not consistently improve final validation performance even when it can sometimes improve convergence behavior. Therefore, this report emphasizes reproducible comparisons, key ablations (with/without offline canvas augmentation), and practical lessons on preprocessing consistency and training stability.
 
 \section{Method}
 \label{sec:method}
 
-% baseline | thr=0.6 | top_k=4 | nms=0.3 | mAP=0.37859099224046894 | AP50=0.7989752286606853 | avg_pred=2.164 | class_error=0.0917 | loss_ce=0.2819 | loss_bbox=0.0593 | loss_giou=0.2666
-% dn_detr | thr=0.2 | top_k=4 | nms=0.3 | mAP=0.002142713475655843 | AP50=0.007419773879386101 | avg_pred=1.525 | class_error=78.3956 | loss_ce=0.5094 | loss_bbox=0.0878 | loss_giou=0.3605
-
 \subsection{Data Processing and Augmentation}
-在資料處理上，後期我主要聚焦於 DN-DETR 的調整。baseline 採用較溫和的增強策略，以 photometric 與輕量幾何擾動為主，包括 brightness/contrast jitter，以及在固定輸入尺寸下的輕度隨機縮放與平移；同時搭配 class-balanced supervision，以提升分類學習穩定性。
+For data processing, the later stage of my work focused mainly on improving DN-DETR. The baseline uses a milder augmentation strategy, mostly photometric and light geometric perturbations, including brightness/contrast jitter and small random scaling and translation under a fixed input size. I also keep class-balanced supervision to make classification training more stable.
 
-在 DN-DETR 方面，我曾測試canvas expansion + Gaussian noise的增強方式，也就是將原圖隨機貼到原圖放大固定倍率的畫布上，並以 Gaussian noise 填補背景（offline 與 online 版本皆有實驗）。結果顯示，當畫布放大倍率超過 $1.1\times$ 時，模型幾乎無法有效學習；將倍率降到不超過 $1.1\times$ 後雖可收斂，但即使訓練至 100 epochs，最終 mAP 仍未優於不使用此增強的設定。因此，最終的 DN-DETR 主線模型不採用 canvas expansion + Gaussian noise，而是沿用與 baseline 一致的前處理設定。
+For DN-DETR, I tested a canvas expansion + Gaussian noise augmentation strategy: randomly pasting the original image onto a larger canvas (with a fixed scale factor) and filling the background with Gaussian noise (both offline and online versions were tested). The result was that when the canvas scale was larger than $1.1\times$, the model almost could not learn effectively. After reducing the scale to at most $1.1\times$, training could converge, but even after 100 epochs, the final mAP was still not better than the setting without this augmentation. So in the final main DN-DETR setup, I did not use canvas expansion + Gaussian noise, and kept preprocessing consistent with the baseline.
 
-在後續除錯過程中，我發現 DN-DETR 的一個關鍵瓶頸並不只來自 loss 或 matching 設定，而是來自影像前處理策略。原本我將所有影像直接 resize 並 pad 成固定的 $720 \times 720$ 正方形輸入，雖然這是一開始最直覺統一資料格式的方式，但是這樣的設定會讓原本小張的圖片上的數字被放到到很多pixel，這樣子一個query就會很難區分這塊是數字還是背景；其次，因為有很多圖片都是小尺寸的，為了配合大圖片而放大的話，整體計算量也會顯著上升，使訓練速度變慢。在這種設定下，DN-DETR 的 class\_error 長期維持在很高的區間，分類幾乎沒有穩定學起來。
+During later debugging, I found that one major bottleneck of DN-DETR was not only from loss or matching settings, but also from image preprocessing. At first, I resized and padded all images to a fixed $720 \times 720$ square input. This was a straightforward way to unify data format, but it made digits in originally small images become much larger in pixels, so each query had a harder time telling whether a region was a digit or background. Also, many images are small, so enlarging them to match larger ones significantly increased computation and slowed training. Under this setup, DN-DETR kept a high class\_error for a long time, and classification did not learn stably.
 
-因此，我將 DN-DETR  train/valid/test的資料流程改成 batch-wise dynamic padding，也就是先保留原圖大小不做resize，然後將同一個 batch 中的影像 pad 到該 batch 最大圖片的長寬，而不再強制每張圖都 pad 到固定的 $720 \times 720$。這項調整能減少大量無效背景，並改善早期訓練穩定度。
+Therefore, I changed the DN-DETR train/valid/test pipeline to batch-wise dynamic padding: keep each image at its original size (no resizing), then pad images in the same batch to that batch's maximum height and width, instead of forcing every image to $720 \times 720$. This reduces a large amount of invalid background and improves early training stability.
 
 \subsection{Model Variants}
 \label{sec:model}
-本次實作主要比較兩個方向：自建的 baseline DETR，以及後續嘗試導入的 DN-DETR。
+This implementation mainly compares two directions: a custom baseline DETR and a later attempt to introduce DN-DETR.
 
-在 baseline中，我嘗試改版成像是DN-DETR一樣讓transformer可以得到多維度的特徵，我額外將三個 fused feature levels 全部展平成 transformer encoder tokens，而不是只取單一最高解析度特徵圖送入 encoder。具體而言，每個尺度的特徵圖都會先搭配對應的 mask 與 sine positional embedding，再加入一個 learnable level embedding，用來告訴 transformer 該 token 來自哪一個 feature level。最後再將不同尺度的 tokens 串接成單一序列送入 encoder。這樣的設計可以讓 decoder query 同時存取高解析度的局部細節與低解析度的高階語意，但是這樣讓我的訓練時間大幅度增加。所以後來將 backbone 輸出的多尺度特徵改為標準 FPN 風格的融合方式。首先，對每一層 feature map 使用 $1 \times 1$ convolution 將通道數對齊到相同維度；接著，將較深層的特徵圖上採樣到較高解析度後，與對應的淺層特徵直接相加；最後，再接上一個 $3 \times 3$ convolution 對融合後的特徵做平滑。這樣的設計可以在維持計算成本相對穩定的情況下，同時保留深層語意資訊與高解析度細節，對小型數字目標較有幫助。
+In the baseline design, I first tried flattening multiple fused feature levels into transformer encoder tokens, so decoder queries could access high-resolution details and low-resolution semantics at the same time. To preserve scale information, each level feature is combined with its positional embedding and a learnable level embedding before concatenation into the encoder. This gives richer representation, but the transformer needs full attention over many cross-scale tokens, which clearly increases training time.
 
-與先前直接將多個 feature levels 全部展平成 transformer tokens 的做法相比，FPN 式融合不需要讓 vanilla transformer 對所有尺度的 token 做 full attention，因此訓練時間顯著較短，也更適合作為目前 baseline 的主線設計。融合完成後，模型僅將最高解析度的 fused feature map 送入 encoder，讓 backbone 端受益於多尺度資訊，但避免 transformer 計算量大幅增加。
+So the later baseline switched to an FPN-style fusion as the main version: first align channels with $1\times1$ convolution, then upsample deeper features and add them to shallower features, and finally apply $3\times3$ convolution to smooth the fused result. Only the highest-resolution fused feature map is sent to the encoder. Compared with the full multi-scale token flattening approach above, this version keeps multi-scale information while significantly reducing computation, with better training efficiency and overall stability.
 
-一開始直接引入DN-DETR來使用，結果預測出的分數很差，跟baseline相比才發現不只有框預測錯誤，接著我從AP50看出大多數時候是有抓到東西的，但是框出物體的精準度還是不構，並且分類非常差。
-相較之下，DN-DETR 雖然理論上具有更快收斂與更穩定 training signal 的優勢，但我目前直接套用後的結果不理想。從驗證結果來看，模型並非完全沒有輸出框，而是常常能偵測到物體存在，但在分類上明顯失敗，導致整體 mAP 與 AP50 都遠低於 baseline。因此，現階段 baseline 仍是較穩定且可持續改進的主線模型。
+
+DN-DETR (DeNoising DETR) is an improved DETR variant that adds denoising training. Original DETR learns end-to-end detection through bipartite matching, but it often has slow convergence and sparse positive supervision in early training. The key idea of DN-DETR is to create an extra set of noisy known targets during training (including label and box perturbations), and train the model to solve both the standard object-query detection task and a denoising reconstruction task. This denoising branch provides denser and more stable learning signals, reduces early matching instability, and usually improves convergence speed and training stability.
+
+Compared with baseline DETR, DN-DETR still keeps a transformer-based end-to-end detection pipeline, but uses stronger training objectives and supervision design. The main differences are: 1) additional denoising queries; 2) auxiliary losses for label/box noise; and 3) more sensitive hyperparameters (such as denoising query count and noise scale). So in practice, besides backbone and decoder design, DN-DETR also relies more on coordinated tuning of preprocessing and loss weights.
 
 \subsection{Hyperparameters}
 \label{sec:hparam}
 
-目前 baseline 的主要訓練設定為 80 個 epochs、主幹學習率 $5 \times 10^{-5}$、backbone 學習率 $5 \times 10^{-6}$、weight decay 為 $10^{-4}$，並在第 60 個 epoch 後將 learning rate 乘上 0.1。除此之外，為了穩定訓練，我也使用 gradient clipping，並搭配 pretrained DETR checkpoint 作為 warm start。由於目前仍在以 baseline 架構調整為主，本報告尚未使用完整的 Optuna 自動化搜尋結果作為最終設定，後續若加入 data augmentation 與更多模型變體，會再統一進行超參數調整。
+The training settings actually used for baseline and DN-DETR are summarized in \cref{tab:hparam_compare}. Both use AdamW, a two-level learning rate setup (smaller LR for the backbone), and 300 object queries. The main differences are the LR scheduler, DN-related denoising parameters, and data augmentation strategy.
 
-對於 DN-DETR，除了 scalar、label noise、box noise 與 learning rate 等超參數外，我也額外測試了輸入前處理方式。實驗顯示，固定方形輸入會引入過多背景並拖慢收斂；改為 batch-wise dynamic padding 後可改善訓練穩定性。同時，``canvas 放大 + 隨機貼圖 + Gaussian noise'' 雖在小幅放大（約 $1.1\times$）時可讓收斂稍微順一些，但最終指標仍未超越無該增強版本，因此主線設定不採用此強增強。
+\begin{table}[tb]
+    \caption{Training hyperparameter comparison between baseline DETR and DN-DETR.}
+    \label{tab:hparam_compare}
+    \centering
+    \small
+    \begin{tabular}{@{}lll@{}}
+        \toprule
+        Hyperparameter & Baseline DETR & DN-DETR \\
+        \midrule
+        Batch size & 32 & 28 \\
+        Epochs & 80 & 70 \\
+        Optimizer & AdamW & AdamW \\
+        LR / backbone LR & $1\times10^{-4}$ / $1\times10^{-5}$ & $1\times10^{-4}$ / $1\times10^{-5}$ \\
+        Weight decay & $1\times10^{-4}$ & $1\times10^{-4}$ \\
+        LR scheduler & StepLR ($\texttt{lr\_drop}=70$, $\gamma=0.1$) & ReduceLROnPlateau ($\gamma=0.5$, patience $=6$, threshold $=5\times10^{-4}$) \\
+        Gradient clip & 0.1 & 0.1 \\
+        Num. queries & 300 & 300 \\
+        Classification loss settings & $\texttt{ce\_loss\_coef}=2.0$, $\texttt{eos\_coef}=0.1$, label smoothing $=0.05$ & $\texttt{cls\_loss\_coef}=2.0$, $\texttt{eos\_coef}=0.05$, \texttt{--no-class-balance} \\
+        DN settings & N/A & scalar $=5$, label noise $=0.2$, box noise $=0.4$ \\
+        Data augmentation & color jitter only (no canvas/noise) & canvas scale $=1.05$, Gaussian noise std $=0.05$ \\
+        Evaluation frequency & disabled during training (no \texttt{--eval-every-epoch}) & every 3 epochs (\texttt{--eval-interval 3}) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+In addition, the DN-DETR version fixes several third-party framework arguments inside \texttt{parse\_args()} (for example, \texttt{dataset\_file=custom\_coco}, \texttt{modelname=dn\_dab\_deformable\_detr}, \texttt{batch\_norm\_type=FrozenBatchNorm2d}, and \texttt{num\_select=num\_queries}). Also, \texttt{--use-dn} is enabled by default in the current code, so all DN-DETR experiments in this report were trained in DN mode.
 
 \section{Results}
 \label{sec:results}
@@ -80,7 +108,7 @@ This report follows the ECCV-style citation format~\cite{eccv_guideline} and sum
 The experimental results are summarized in \cref{tab:results}. I omit most intermediate figures here and keep only the validation scores for clearer comparison.
 
 \begin{table}[tb]
-    \caption{Summary of validation scores for different model variants.}
+    \caption{Validation score comparison for baseline variants (with/without FPN) and DN-DETR under different offline canvas augmentation settings.}
     \label{tab:results}
     \centering
     \small
@@ -88,17 +116,14 @@ The experimental results are summarized in \cref{tab:results}. I omit most inter
         \toprule
         Model / Version & Backbone / Setting & Description & Score \\
         \midrule
-        \texttt{Baseline} & DETR + ResNet-50 & single-scale baseline setting & 0.3786 \\
-        \texttt{Baseline + FPN Fusion} & DETR + ResNet-50 & $1 \times 1$ conv + upsample + add + $3 \times 3$ conv smoothing & tbd \\
-        \texttt{DN-DETR} & DN-DETR setting V1 & direct imported setting, classification unstable & 0.0021 \\
+        \texttt{Baseline (No FPN, No Canvas Offline Aug)} & DETR + ResNet-50 & trained on original train set & 0.28 \\
+        \texttt{Baseline with FPN (No Canvas Offline Aug)} & DETR + ResNet-50 + FPN fusion & trained on original train set & tbd \\
+        \texttt{Baseline with FPN (Canvas Offline Aug)} & DETR + ResNet-50 + FPN fusion & trained on offline canvas-augmented train set & tbd \\
+        \texttt{DN-DETR (No Canvas Offline Aug)} & DN-Deformable-DETR-R50 & trained on original train set & 0.37 \\
+        \texttt{DN-DETR (Canvas Offline Aug)} & DN-Deformable-DETR-R50 & trained on offline canvas-augmented train set & 0.26 \\
         \bottomrule
     \end{tabular}
 \end{table}
-
-從目前的結果來看，baseline DETR 明顯優於直接導入的 DN-DETR。baseline 在 validation 上可達到 mAP $= 0.3786$、AP50 $= 0.7990$，代表模型大多數情況下已能抓到數字位置，且整體偵測品質尚可。相對地，DN-DETR 目前只有 mAP $= 0.0021$、AP50 $= 0.0074$，顯示目前設定下幾乎無法有效完成偵測任務。
-
-進一步觀察 loss 與診斷指標，可以發現 DN-DETR 的問題不只在框的位置回歸，而是分類學習幾乎沒有建立起來。雖然平均每張影像仍會輸出部分預測框，但這些框大多類別不正確，導致整體指標非常差。因此，本次後續改進主要回到 baseline 上，先針對 FPN 式多尺度特徵融合與分類 supervision 做加強，再評估是否重新調整 DN-DETR 的訓練流程。
-
 
 \bibliographystyle{splncs04}
 \bibliography{main}

@@ -60,17 +60,17 @@ If you do not already have a trained checkpoint, use `train` first. You can also
   --lr-drop 70 \
   --lr-gamma 0.1 \
   --clip-max-norm 0.1 \
-  --cost-class 4.0 \
-  --cost-bbox 5.0 \
-  --cost-giou 2.0 \
   --ce-loss-coef 2.0 \
   --eos-coef 0.1 \
   --label-smoothing 0.05 \
   --image-size 720 \
   --freeze-transformer \
   --early-stop-patience 10 \
-  --checkpoint-dir checkpoints/detr_onPretrain \
-  --output pred_freeze_transformer.json
+  --num-queries 300 \
+  --train-dir nycu-hw2-data/train_canvas_offline \
+  --train-json nycu-hw2-data/train_canvas_offline.json \
+  --checkpoint-dir checkpoints/detr_canvas_offline \
+  --output pred_baseline_canvas_offline.json
 ```
 
 `train` 目前預設會在結束後自動做一次 inference。若你只想訓練、不想自動輸出預測，可以加上 `--no-predict-after-train`。
