@@ -19,14 +19,17 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{multirow}
+\usepackage{tabularx}
 \usepackage[accsupp]{axessibility}
 \usepackage{hyperref}
 \usepackage{orcidlink}
+\usepackage{array}
+
 
 \begin{document}
 
-\title{Visual Recognition Using Deep Learning Homework 1 Report}
-\titlerunning{VRDL Homework 1 Report}
+\title{Visual Recognition Using Deep Learning Homework 2 Report}
+\titlerunning{VRDL Homework 2 Report}
 
 \author{Pao-Hua Hsu}
 \authorrunning{P.-H. Hsu}
@@ -39,7 +42,7 @@ Student ID: 314581025\\
 
 \section{Introduction}
 \label{sec:intro}
-This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}. The task is digit object detection, and my experiments focus on two DETR-style directions: a custom baseline DETR and DN-Deformable-DETR.
+This report follows the ECCV-style citation format~\cite{eccv_guideline} and summarizes my implementation for the NYCU Visual Recognition Using Deep Learning homework~\cite{lin2026course}. The task is digit object detection, and my experiments focus on two DETR-style directions: a custom baseline DETR~\cite{carion2020detr} and DN-Deformable-DETR with denoising training~\cite{li2022dndetr}.
 
 On the model side, I evaluate a baseline DETR pipeline (including FPN-style feature fusion variants) and a DN-DETR pipeline with denoising training. On the data side, I test both the original training set and an offline canvas-augmented version (random paste on enlarged canvas with Gaussian-noise background), then analyze whether this augmentation helps both models consistently.
 
@@ -59,14 +62,14 @@ Therefore, I changed the DN-DETR train/valid/test pipeline to batch-wise dynamic
 
 \subsection{Model Variants}
 \label{sec:model}
-This implementation mainly compares two directions: a custom baseline DETR and a later attempt to introduce DN-DETR.
+This implementation mainly compares two directions: a custom baseline DETR and a later attempt to introduce DN-DETR. For both directions, the main backbone is ResNet-50~\cite{He2015DeepRL}.
 
 In the baseline design, I first tried flattening multiple fused feature levels into transformer encoder tokens, so decoder queries could access high-resolution details and low-resolution semantics at the same time. To preserve scale information, each level feature is combined with its positional embedding and a learnable level embedding before concatenation into the encoder. This gives richer representation, but the transformer needs full attention over many cross-scale tokens, which clearly increases training time.
 
 So the later baseline switched to an FPN-style fusion as the main version: first align channels with $1\times1$ convolution, then upsample deeper features and add them to shallower features, and finally apply $3\times3$ convolution to smooth the fused result. Only the highest-resolution fused feature map is sent to the encoder. Compared with the full multi-scale token flattening approach above, this version keeps multi-scale information while significantly reducing computation, with better training efficiency and overall stability.
 
 
-DN-DETR (DeNoising DETR) is an improved DETR variant that adds denoising training. Original DETR learns end-to-end detection through bipartite matching, but it often has slow convergence and sparse positive supervision in early training. The key idea of DN-DETR is to create an extra set of noisy known targets during training (including label and box perturbations), and train the model to solve both the standard object-query detection task and a denoising reconstruction task. This denoising branch provides denser and more stable learning signals, reduces early matching instability, and usually improves convergence speed and training stability.
+DN-DETR (DeNoising DETR)~\cite{li2022dndetr} is an improved DETR variant that adds denoising training. Original DETR~\cite{carion2020detr} learns end-to-end detection through bipartite matching, but it often has slow convergence and sparse positive supervision in early training. The key idea of DN-DETR is to create an extra set of noisy known targets during training (including label and box perturbations), and train the model to solve both the standard object-query detection task and a denoising reconstruction task. This denoising branch provides denser and more stable learning signals, reduces early matching instability, and usually improves convergence speed and training stability.
 
 Compared with baseline DETR, DN-DETR still keeps a transformer-based end-to-end detection pipeline, but uses stronger training objectives and supervision design. The main differences are: 1) additional denoising queries; 2) auxiliary losses for label/box noise; and 3) more sensitive hyperparameters (such as denoising query count and noise scale). So in practice, besides backbone and decoder design, DN-DETR also relies more on coordinated tuning of preprocessing and loss weights.
 
@@ -79,8 +82,9 @@ The training settings actually used for baseline and DN-DETR are summarized in \
     \caption{Training hyperparameter comparison between baseline DETR and DN-DETR.}
     \label{tab:hparam_compare}
     \centering
-    \small
-    \begin{tabular}{@{}lll@{}}
+    \scriptsize
+    \setlength{\tabcolsep}{4pt}
+    \begin{tabularx}{\linewidth}{@{}p{0.22\linewidth}XX@{}}
         \toprule
         Hyperparameter & Baseline DETR & DN-DETR \\
         \midrule
@@ -97,10 +101,10 @@ The training settings actually used for baseline and DN-DETR are summarized in \
         Data augmentation & color jitter only (no canvas/noise) & canvas scale $=1.05$, Gaussian noise std $=0.05$ \\
         Evaluation frequency & disabled during training (no \texttt{--eval-every-epoch}) & every 3 epochs (\texttt{--eval-interval 3}) \\
         \bottomrule
-    \end{tabular}
+    \end{tabularx}
 \end{table}
 
-In addition, the DN-DETR version fixes several third-party framework arguments inside \texttt{parse\_args()} (for example, \texttt{dataset\_file=custom\_coco}, \texttt{modelname=dn\_dab\_deformable\_detr}, \texttt{batch\_norm\_type=FrozenBatchNorm2d}, and \texttt{num\_select=num\_queries}). Also, \texttt{--use-dn} is enabled by default in the current code, so all DN-DETR experiments in this report were trained in DN mode.
+In addition, the DN-DETR version fixes several third-party framework arguments inside \path|parse_args()|, including \path|dataset_file=custom_coco|, \path|modelname=dn_dab_deformable_detr|, \path|batch_norm_type=FrozenBatchNorm2d|, and \path|num_select=num_queries|. Also, \path|--use-dn| is enabled by default in the current code, so all DN-DETR experiments in this report were trained in DN mode.
 
 \section{Results}
 \label{sec:results}
@@ -111,8 +115,9 @@ The experimental results are summarized in \cref{tab:results}. I omit most inter
     \caption{Validation score comparison for baseline variants (with/without FPN) and DN-DETR under different offline canvas augmentation settings.}
     \label{tab:results}
     \centering
-    \small
-    \begin{tabular}{@{}llll@{}}
+    \scriptsize
+    \setlength{\tabcolsep}{4pt}
+    \begin{tabularx}{\linewidth}{@{}p{0.34\linewidth}p{0.24\linewidth}Xp{0.08\linewidth}@{}}
         \toprule
         Model / Version & Backbone / Setting & Description & Score \\
         \midrule
@@ -121,7 +126,7 @@ The experimental results are summarized in \cref{tab:results}. I omit most inter
         \texttt{DN-DETR (No Canvas Offline Aug)} & DN-Deformable-DETR-R50 & trained on original train set & 0.37 \\
         \texttt{DN-DETR (Canvas Offline Aug)} & DN-Deformable-DETR-R50 & trained on offline canvas-augmented train set & 0.26 \\
         \bottomrule
-    \end{tabular}
+    \end{tabularx}
 \end{table}
 
 \bibliographystyle{splncs04}
