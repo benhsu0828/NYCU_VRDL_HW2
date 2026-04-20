@@ -12,12 +12,14 @@ import argparse
 import json
 import sys
 import time
+from types import MethodType
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.ops import batched_nms
@@ -37,12 +39,13 @@ DN_IMPORT_ERROR: Exception | None = None
 try:
     from engine import train_one_epoch as dn_train_one_epoch
     from models.dn_dab_deformable_detr import build_dab_deformable_detr
-    from util.misc import NestedTensor
+    from util.misc import NestedTensor, accuracy
 except Exception as exc:  # pragma: no cover - depends on runtime environment
     DN_IMPORT_ERROR = exc
     dn_train_one_epoch = None
     build_dab_deformable_detr = None
     NestedTensor = None
+    accuracy = None
 
 
 def require_dn_detr() -> None:
@@ -62,8 +65,8 @@ def require_dn_detr() -> None:
 def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--image-size", type=int, default=720)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--tensorboard", action="store_true")
     parser.add_argument(
@@ -96,26 +99,27 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=4,
+        default=5,
         help="Optional max detections per image after thresholding and NMS; 0 disables the cap.",
     )
     parser.add_argument(
         "--nms-iou-threshold",
         type=float,
-        default=0.4,
+        default=0,
         help="Class-aware NMS IoU threshold after score filtering; set <= 0 to disable NMS.",
     )
 
 
 def add_model_training_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr-backbone", type=float, default=1e-5)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lr-backbone", type=float, default=5e-6)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--lr-drop", type=int, default=40)
     parser.add_argument("--lr-gamma", type=float, default=0.1)
+    parser.add_argument("--plateau-patience", type=int, default=2)
+    parser.add_argument("--plateau-threshold", type=float, default=1e-4)
     parser.add_argument("--clip-max-norm", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=40)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument(
         "--pretrained-checkpoint",
@@ -125,6 +129,12 @@ def add_model_training_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--eval-every-epoch", action="store_true")
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=3,
+        help="Run COCO mAP evaluation every N epochs; ignored when --eval-every-epoch is set.",
+    )
     parser.add_argument("--predict-after-train", action="store_true")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument(
@@ -135,18 +145,34 @@ def add_model_training_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--set-cost-class", type=float, default=2.0)
     parser.add_argument("--set-cost-bbox", type=float, default=5.0)
-    parser.add_argument("--set-cost-giou", type=float, default=2.0)
-    parser.add_argument("--cls-loss-coef", type=float, default=1.0)
+    parser.add_argument("--set-cost-giou", type=float, default=3.0)
+    parser.add_argument("--cls-loss-coef", type=float, default=2.0)
     parser.add_argument("--bbox-loss-coef", type=float, default=5.0)
-    parser.add_argument("--giou-loss-coef", type=float, default=2.0)
-    parser.add_argument("--eos-coef", type=float, default=0.1)
+    parser.add_argument("--giou-loss-coef", type=float, default=3.0)
+    parser.add_argument("--eos-coef", type=float, default=0.05)
     parser.add_argument("--focal-alpha", type=float, default=0.25)
+    parser.add_argument("--no-class-balance", action="store_true")
+    parser.add_argument("--class-balance-power", type=float, default=0.5)
+    parser.add_argument("--class-balance-min", type=float, default=0.5)
+    parser.add_argument("--class-balance-max", type=float, default=3.5)
 
     parser.add_argument("--use-dn", action="store_true", default=True)
-    parser.add_argument("--scalar", type=int, default=5)
-    parser.add_argument("--label-noise-scale", type=float, default=0.2)
-    parser.add_argument("--box-noise-scale", type=float, default=0.4)
+    parser.add_argument("--scalar", type=int, default=2)
+    parser.add_argument("--label-noise-scale", type=float, default=0.0)
+    parser.add_argument("--box-noise-scale", type=float, default=0.2)
     parser.add_argument("--no-augmentation", action="store_true")
+    parser.add_argument(
+        "--canvas-scale-factor",
+        type=float,
+        default=1.2,
+        help="Canvas expansion factor for train-time random placement augmentation.",
+    )
+    parser.add_argument(
+        "--random-expand-noise-std",
+        type=float,
+        default=0.08,
+        help="Std of Gaussian noise used to fill expanded canvas background (in normalized tensor space).",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,13 +233,150 @@ def parse_args() -> argparse.Namespace:
 
 def dn_collate_fn(batch: list[tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]]) -> tuple[Any, list[dict[str, torch.Tensor]]]:
     images, masks, targets = zip(*batch)
-    samples = NestedTensor(torch.stack(images, dim=0), torch.stack(masks, dim=0))
-    return samples, list(targets)
+    max_height = max(int(image.shape[-2]) for image in images)
+    max_width = max(int(image.shape[-1]) for image in images)
+
+    padded_images: list[torch.Tensor] = []
+    padded_masks: list[torch.Tensor] = []
+    updated_targets: list[dict[str, torch.Tensor]] = []
+
+    for image, mask, target in zip(images, masks, targets):
+        height = int(image.shape[-2])
+        width = int(image.shape[-1])
+        padded_image = torch.zeros((image.shape[0], max_height, max_width), dtype=image.dtype)
+        padded_image[:, :height, :width] = image
+        padded_mask = torch.ones((max_height, max_width), dtype=mask.dtype)
+        padded_mask[:height, :width] = mask
+
+        updated_target = dict(target)
+        updated_target["size"] = torch.tensor([max_height, max_width], dtype=torch.int64)
+        if updated_target["boxes_abs"].numel() > 0:
+            normalized_boxes = baseline.box_xyxy_to_cxcywh(updated_target["boxes_abs"])
+            normalized_boxes[:, 0] /= float(max_width)
+            normalized_boxes[:, 2] /= float(max_width)
+            normalized_boxes[:, 1] /= float(max_height)
+            normalized_boxes[:, 3] /= float(max_height)
+            updated_target["boxes"] = normalized_boxes
+        else:
+            updated_target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
+
+        padded_images.append(padded_image)
+        padded_masks.append(padded_mask)
+        updated_targets.append(updated_target)
+
+    samples = NestedTensor(torch.stack(padded_images, dim=0), torch.stack(padded_masks, dim=0))
+    return samples, updated_targets
+
+
+class BatchMaxPadDetrTransform:
+    """Resize to fit within a max side length, then pad per batch in collate."""
+
+    def __init__(
+        self,
+        image_size: int,
+        augment: bool = False,
+        canvas_scale_factor: float = 1.5,
+        random_expand_noise_std: float = 0.08,
+        mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
+        std: tuple[float, float, float] = (0.229, 0.224, 0.225),
+    ) -> None:
+        self.image_size = image_size
+        self.augment = augment
+        self.canvas_scale_factor = max(1.0, float(canvas_scale_factor))
+        self.random_expand_noise_std = max(0.0, float(random_expand_noise_std))
+        self.to_tensor = baseline.transforms.ToTensor()
+        self.normalize = baseline.transforms.Normalize(mean=mean, std=std)
+        self.color_jitter = baseline.transforms.ColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.1,
+            hue=0.02,
+        )
+
+    def __call__(
+        self,
+        image,
+        boxes_xywh: torch.Tensor | None,
+        image_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        image = image.convert("RGB")
+        orig_width, orig_height = image.size
+        if self.augment and torch.rand(1).item() < 0.8:
+            image = self.color_jitter(image)
+
+        if self.augment:
+            # Keep original size (scale=1.0), then paste onto a larger noise canvas.
+            scale = 1.0
+            resized_width = max(1, int(orig_width))
+            resized_height = max(1, int(orig_height))
+            image_tensor = self.normalize(self.to_tensor(image))
+            canvas_width = max(1, int(round(orig_width * self.canvas_scale_factor)))
+            canvas_height = max(1, int(round(orig_height * self.canvas_scale_factor)))
+            canvas_width = max(canvas_width, resized_width)
+            canvas_height = max(canvas_height, resized_height)
+            max_top = canvas_height - resized_height
+            max_left = canvas_width - resized_width
+            top = int(torch.randint(0, max_top + 1, (1,)).item()) if max_top > 0 else 0
+            left = int(torch.randint(0, max_left + 1, (1,)).item()) if max_left > 0 else 0
+            canvas = torch.randn((3, canvas_height, canvas_width), dtype=image_tensor.dtype) * self.random_expand_noise_std
+            canvas[:, top : top + resized_height, left : left + resized_width] = image_tensor
+            image_tensor = canvas
+            mask = torch.ones((canvas_height, canvas_width), dtype=torch.bool)
+            mask[top : top + resized_height, left : left + resized_width] = False
+        else:
+            # Validation/test: keep original resolution and rely on batch-max
+            # padding in collate_fn for batching.
+            scale = 1.0
+            resized_width = max(1, int(orig_width))
+            resized_height = max(1, int(orig_height))
+            image_tensor = self.normalize(self.to_tensor(image))
+            canvas_height = resized_height
+            canvas_width = resized_width
+            top = 0
+            left = 0
+            mask = torch.zeros((canvas_height, canvas_width), dtype=torch.bool)
+
+        target: dict[str, torch.Tensor] = {
+            "image_id": torch.tensor(image_id, dtype=torch.int64),
+            "orig_size": torch.tensor([orig_height, orig_width], dtype=torch.int64),
+            "size": torch.tensor([canvas_height, canvas_width], dtype=torch.int64),
+            "resized_size": torch.tensor([resized_height, resized_width], dtype=torch.int64),
+            "scale": torch.tensor(scale, dtype=torch.float32),
+            "offset": torch.tensor([top, left], dtype=torch.int64),
+        }
+
+        if boxes_xywh is None:
+            target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
+            target["boxes_abs"] = torch.zeros((0, 4), dtype=torch.float32)
+            target["labels"] = torch.zeros((0,), dtype=torch.int64)
+            return image_tensor, mask, target
+
+        scaled_boxes_xywh = boxes_xywh.clone().float()
+        scaled_boxes_xywh[:, :4] *= scale
+        boxes_abs = baseline.box_xywh_to_xyxy(scaled_boxes_xywh)
+        if top != 0 or left != 0:
+            boxes_abs[:, 0::2] += float(left)
+            boxes_abs[:, 1::2] += float(top)
+        boxes_abs = baseline.clip_xyxy_to_image(boxes_abs, float(canvas_width), float(canvas_height))
+        boxes_norm = baseline.box_xyxy_to_cxcywh(boxes_abs)
+        boxes_norm[:, 0] /= float(canvas_width)
+        boxes_norm[:, 2] /= float(canvas_width)
+        boxes_norm[:, 1] /= float(canvas_height)
+        boxes_norm[:, 3] /= float(canvas_height)
+
+        target["boxes_abs"] = boxes_abs
+        target["boxes"] = boxes_norm
+        return image_tensor, mask, target
 
 
 def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
-    train_transform = baseline.FixedSizeDetrTransform(image_size=args.image_size, augment=not args.no_augmentation)
-    valid_transform = baseline.FixedSizeDetrTransform(image_size=args.image_size, augment=False)
+    train_transform = BatchMaxPadDetrTransform(
+        image_size=args.image_size,
+        augment=not args.no_augmentation,
+        canvas_scale_factor=args.canvas_scale_factor,
+        random_expand_noise_std=args.random_expand_noise_std,
+    )
+    valid_transform = BatchMaxPadDetrTransform(image_size=args.image_size, augment=False)
     train_dataset = baseline.CocoDigitDataset(
         image_dir=args.train_dir,
         annotation_path=args.train_json,
@@ -248,7 +411,7 @@ def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]
 
 
 def build_test_dataloader(args: argparse.Namespace) -> DataLoader:
-    transform = baseline.FixedSizeDetrTransform(image_size=args.image_size, augment=False)
+    transform = BatchMaxPadDetrTransform(image_size=args.image_size, augment=False)
     dataset = baseline.TestDigitDataset(image_dir=args.test_dir, transform=transform)
     return DataLoader(
         dataset,
@@ -265,6 +428,88 @@ def build_test_dataloader(args: argparse.Namespace) -> DataLoader:
 def build_model(args: argparse.Namespace):
     require_dn_detr()
     return build_dab_deformable_detr(args)
+
+
+def class_balanced_sigmoid_focal_loss(
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    num_boxes: float,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+    positive_class_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    prob = inputs.sigmoid()
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+    loss = ce_loss * ((1.0 - p_t) ** gamma)
+
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+        loss = alpha_t * loss
+
+    if positive_class_weights is not None:
+        class_weights = positive_class_weights.view(*([1] * (targets.ndim - 1)), -1)
+        loss = loss * torch.where(targets > 0, class_weights, torch.ones_like(loss))
+
+    return loss.mean(1).sum() / max(float(num_boxes), 1.0)
+
+
+def configure_dn_classification_loss(
+    criterion: torch.nn.Module,
+    class_weight: torch.Tensor | None,
+) -> None:
+    if class_weight is None:
+        return
+    if accuracy is None:
+        raise RuntimeError("DN accuracy helper is unavailable; DN-DETR import did not complete successfully.")
+
+    criterion.register_buffer("positive_class_weight", class_weight)
+
+    def loss_labels(
+        self,
+        outputs: dict[str, torch.Tensor],
+        targets: list[dict[str, torch.Tensor]],
+        indices: list[tuple[torch.Tensor, torch.Tensor]],
+        num_boxes: float,
+        log: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        assert "pred_logits" in outputs
+        src_logits = outputs["pred_logits"]
+
+        idx = self._get_src_permutation_idx(indices)
+        target_classes_o = torch.cat([t["labels"][j] for t, (_, j) in zip(targets, indices)])
+        target_classes = torch.full(
+            src_logits.shape[:2],
+            self.num_classes,
+            dtype=torch.int64,
+            device=src_logits.device,
+        )
+        target_classes[idx] = target_classes_o
+
+        target_classes_onehot = torch.zeros(
+            [src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
+            dtype=src_logits.dtype,
+            layout=src_logits.layout,
+            device=src_logits.device,
+        )
+        target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
+        target_classes_onehot = target_classes_onehot[:, :, :-1]
+
+        loss_ce = class_balanced_sigmoid_focal_loss(
+            src_logits,
+            target_classes_onehot,
+            num_boxes,
+            alpha=self.focal_alpha,
+            gamma=2.0,
+            positive_class_weights=self.positive_class_weight,
+        ) * src_logits.shape[1]
+        losses = {"loss_ce": loss_ce}
+
+        if log:
+            losses["class_error"] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
+        return losses
+
+    criterion.loss_labels = MethodType(loss_labels, criterion)
 
 
 def apply_training_freezes(model: torch.nn.Module, args: argparse.Namespace) -> list[str]:
@@ -349,7 +594,10 @@ def generate_predictions(
         for batch_idx in range(pred_boxes.shape[0]):
             scores = scores_per_query[batch_idx]
             labels = labels_per_query[batch_idx]
-            boxes_xyxy = baseline.box_cxcywh_to_xyxy(pred_boxes[batch_idx]) * float(args.image_size)
+            padded_height = int(targets[batch_idx]["size"][0].item())
+            padded_width = int(targets[batch_idx]["size"][1].item())
+            scale_factors = pred_boxes[batch_idx].new_tensor([padded_width, padded_height, padded_width, padded_height])
+            boxes_xyxy = baseline.box_cxcywh_to_xyxy(pred_boxes[batch_idx]) * scale_factors
 
             scale = float(targets[batch_idx]["scale"].item())
             orig_height = int(targets[batch_idx]["orig_size"][0].item())
@@ -405,9 +653,10 @@ def save_checkpoint(
     checkpoint_path: Path,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: StepLR,
+    scheduler: Any,
     epoch: int,
     best_valid_loss: float,
+    best_map: float,
     args: argparse.Namespace,
 ) -> None:
     serialized_args = {
@@ -422,6 +671,7 @@ def save_checkpoint(
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "best_valid_loss": best_valid_loss,
+            "best_map": best_map,
             "args": serialized_args,
         },
         checkpoint_path,
@@ -432,7 +682,7 @@ def load_checkpoint(
     checkpoint_path: Path,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
-    scheduler: StepLR | None = None,
+    scheduler: Any = None,
     device: torch.device | str = "cpu",
 ) -> dict[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -478,6 +728,9 @@ def load_pretrained_model_weights(
         preview = ", ".join(unexpected_keys[:8])
         suffix = "..." if len(unexpected_keys) > 8 else ""
         print(f"Unexpected pretrained keys ignored: {preview}{suffix}")
+    checkpoint["_codex_skipped_keys"] = skipped_keys
+    checkpoint["_codex_missing_keys"] = list(missing_keys)
+    checkpoint["_codex_unexpected_keys"] = list(unexpected_keys)
     return checkpoint
 
 
@@ -506,6 +759,15 @@ def run_train(args: argparse.Namespace) -> None:
     model = model.to(device)
     criterion = criterion.to(device)
     frozen_modules = apply_training_freezes(model, args)
+    class_weight = None
+    if not args.no_class_balance:
+        class_weight = baseline.build_class_weight_from_counts(
+            train_loader.dataset.class_counts,
+            power=args.class_balance_power,
+            min_weight=args.class_balance_min,
+            max_weight=args.class_balance_max,
+        ).to(device)
+        configure_dn_classification_loss(criterion, class_weight)
 
     total_params, trainable_params = baseline.count_parameters(model)
     print(
@@ -514,6 +776,14 @@ def run_train(args: argparse.Namespace) -> None:
     )
     if frozen_modules:
         print(f"Frozen modules: {', '.join(frozen_modules)}")
+    if class_weight is not None:
+        rounded = [round(value, 3) for value in class_weight.detach().cpu().tolist()]
+        print(f"Using class-balanced DN focal weights: {rounded}")
+    if args.freeze_transformer:
+        print(
+            "Warning: --freeze-transformer is a high-risk setting for this 10-class fine-tuning task, "
+            "especially because the DN classification head is reinitialized."
+        )
 
     optimizer = AdamW(
         [
@@ -537,19 +807,43 @@ def run_train(args: argparse.Namespace) -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    scheduler = StepLR(optimizer, step_size=args.lr_drop, gamma=args.lr_gamma)
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=args.lr_gamma,
+        patience=args.plateau_patience,
+        threshold=args.plateau_threshold,
+    )
 
     start_epoch = 1
     best_valid_loss = float("inf")
+    best_map = float("-inf")
     if args.resume is not None and args.resume.exists():
         checkpoint = load_checkpoint(args.resume, model, optimizer, scheduler, device=device)
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
         best_valid_loss = float(checkpoint.get("best_valid_loss", float("inf")))
+        best_map = float(checkpoint.get("best_map", float("-inf")))
         print(f"Resumed from {args.resume} at epoch {start_epoch}.")
     elif args.pretrained_checkpoint is not None:
         if not args.pretrained_checkpoint.exists():
             raise FileNotFoundError(f"Pretrained checkpoint not found: {args.pretrained_checkpoint}")
-        load_pretrained_model_weights(args.pretrained_checkpoint, model, device=device)
+        warm_start = load_pretrained_model_weights(args.pretrained_checkpoint, model, device=device)
+        skipped_keys = warm_start.get("_codex_skipped_keys", [])
+        skipped_classification_keys = [
+            key for key in skipped_keys if "class_embed" in key or "label_enc" in key
+        ]
+        if skipped_classification_keys:
+            preview = ", ".join(skipped_classification_keys[:6])
+            suffix = "..." if len(skipped_classification_keys) > 6 else ""
+            print(
+                "Warm start skipped DN classification tensors due to shape mismatch: "
+                f"{preview}{suffix}"
+            )
+            if args.freeze_transformer:
+                print(
+                    "This means the classifier is learning almost from scratch while the transformer is frozen; "
+                    "prefer removing --freeze-transformer first."
+                )
 
     try:
         for epoch in range(start_epoch, args.epochs + 1):
@@ -568,10 +862,13 @@ def run_train(args: argparse.Namespace) -> None:
             )
             valid_stats = evaluate_loss(model, criterion, valid_loader, device, args)
             eval_stats: dict[str, float] | None = None
-            if args.eval_every_epoch:
+            should_eval_map = args.eval_every_epoch or (
+                args.eval_interval > 0 and epoch % args.eval_interval == 0
+            )
+            if should_eval_map:
                 predictions, _ = generate_predictions(model, valid_loader, device, args)
                 eval_stats = baseline.maybe_run_coco_eval(args.valid_json, predictions)
-            scheduler.step()
+            scheduler.step(valid_stats["loss_total"])
 
             status_parts = [
                 f"epoch={epoch:03d}",
@@ -613,28 +910,31 @@ def run_train(args: argparse.Namespace) -> None:
 
             if valid_stats["loss_total"] < best_valid_loss:
                 best_valid_loss = valid_stats["loss_total"]
-                best_path = args.checkpoint_dir / "best.pth"
-                save_checkpoint(best_path, model, optimizer, scheduler, epoch, best_valid_loss, args)
+
+            if eval_stats is not None and eval_stats["map"] > best_map:
+                best_map = eval_stats["map"]
+                best_map_path = args.checkpoint_dir / "best_map.pth"
+                save_checkpoint(best_map_path, model, optimizer, scheduler, epoch, best_valid_loss, best_map, args)
 
             last_path = args.checkpoint_dir / "last.pth"
-            save_checkpoint(last_path, model, optimizer, scheduler, epoch, best_valid_loss, args)
+            save_checkpoint(last_path, model, optimizer, scheduler, epoch, best_valid_loss, best_map, args)
     finally:
         if writer is not None:
             writer.close()
 
     train_elapsed = time.perf_counter() - train_start_time
-    best_path = args.checkpoint_dir / "best.pth"
+    best_map_path = args.checkpoint_dir / "best_map.pth"
     last_path = args.checkpoint_dir / "last.pth"
     print(f"Total training time: {baseline.format_duration(train_elapsed)}")
-    if best_path.exists():
-        print(f"Best checkpoint: {best_path}")
+    if best_map_path.exists():
+        print(f"Best mAP checkpoint: {best_map_path}")
     if last_path.exists():
         print(f"Last checkpoint: {last_path}")
     if args.tensorboard:
         print(f"TensorBoard logdir: {args.tensorboard_dir}")
 
     if args.predict_after_train:
-        predict_checkpoint = best_path if best_path.exists() else args.checkpoint_dir / "last.pth"
+        predict_checkpoint = best_map_path if best_map_path.exists() else args.checkpoint_dir / "last.pth"
         load_checkpoint(predict_checkpoint, model, device=device)
         print(f"Running prediction with checkpoint {predict_checkpoint}")
         run_prediction_with_model(model, args, device)

@@ -90,24 +90,75 @@ Check the compiled operator:
 ./docker/run_dn_detr.sh python -c "import torch; import MultiScaleDeformableAttention; print('ok')"
 ```
 
+
 ## Train and Predict
 
 ```bash
-./docker/run_dn_detr.sh python src/main_dn_deformable.py train \
+# This is data augmentation version
+# ./docker/run_dn_detr.sh python src/main_dn_deformable.py train \
+#   --tensorboard \
+#   --batch-size 24 \
+#   --predict-after-train \
+#   --epochs 100 \
+#   --eval-interval 3 \
+#   --train-dir nycu-hw2-data/train_canvas_offline \
+#   --train-json nycu-hw2-data/train_canvas_offline.json \
+#   --scalar 4 \
+#   --label-noise-scale 0.05 \
+#   --box-noise-scale 0.1 \
+#   --dropout 0.1 \
+#   --lr 3e-4 \
+#   --canvas-scale-factor 1.0 \
+#   --random-expand-noise-std 0.0 \
+#   --lr-gamma 0.5 \
+#   --plateau-patience 6 \
+#   --plateau-threshold 5e-4 \
+#   --image-size 720 \
+#   --num-queries 250 \
+#   --checkpoint-dir checkpoints/dn_deformable_aug \
+#   --tensorboard-dir tensorboard_dn_deformable/data_aug3 \
+#   --output predict_result/pred_dn_deformable_aug3.json
+
+    # --eval-every-epoch \
+    # --resume /home/ben/nycu_hw/NYCU_VRDL_HW2/checkpoints/dn_deformable_digits_V3/best_map.pth \
+
+  ./docker/run_dn_detr.sh python src/main_dn_deformable.py train \
   --tensorboard \
-  --eval-every-epoch \
+  --batch-size 28 \
   --predict-after-train \
-  --checkpoint-dir checkpoints/dn_deformable_freeze_transformer \
-  --tensorboard-dir tensorboard_dn_deformable/freeze_transformer \
-  --output pred_dn_deformable_freeze_transformer.json
+  --no-class-balance \
+  --epochs 70 \
+  --eval-interval 3 \
+  --scalar 5 \
+  --canvas-scale-factor 1.05 \
+  --random-expand-noise-std 0.05 \
+  --dropout 0.1 \
+  --label-noise-scale 0.2 \
+  --box-noise-scale 0.4 \
+  --lr 1e-4 \
+  --lr-backbone 1e-5 \
+  --lr-gamma 0.5 \
+  --plateau-patience 6 \
+  --plateau-threshold 5e-4 \
+  --image-size 720 \
+  --num-queries 300 \
+  --checkpoint-dir checkpoints/dn_deformable_digit_100epoch\
+  --tensorboard-dir tensorboard_dn_deformable/digit_100epoch \
+  --output predict_result/pred_dn_deformable_digit_100epoch.json
 ```
+
+For this homework dataset, start without `--freeze-transformer`.
+That flag tends to fail here because the COCO pretrained checkpoint cannot directly reuse the DN classification head after switching from COCO classes to 10 digit classes.
 
 ## Predict
 
 ```bash
 ./docker/run_dn_detr.sh python src/main_dn_deformable.py predict \
-  --checkpoint checkpoints/dn_deformable/best.pth \
-  --output pred_dn_deformable.json
+  --checkpoint checkpoints/dn_deformable_aug/best.pth \
+  --output predict_result/pred_dn_deformable_aug.json \
+  --nms-iou-threshold 0 \
+  --score-threshold 0.1 \
+  --top-k 10
 ```
 
 ## TensorBoard

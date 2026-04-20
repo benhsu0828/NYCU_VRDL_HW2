@@ -163,7 +163,7 @@ def print_prediction_score_summary(summary: PredictionScoreSummary, score_thresh
         )
 
 class FixedSizeDetrTransform:
-    """Resize with aspect ratio preserved and pad to a fixed square canvas."""
+    """Keep original resolution and defer padding to batch collation."""
 
     def __init__(
         self,
@@ -176,8 +176,7 @@ class FixedSizeDetrTransform:
         self.augment = augment
         self.to_tensor = transforms.ToTensor()
         self.normalize = transforms.Normalize(mean=mean, std=std)
-        # Digits are not safely left-right flippable, so use photometric jitter
-        # plus mild scale/translation augmentation instead of horizontal flips.
+        # Keep only photometric jitter; no geometric resize/translation here.
         self.color_jitter = transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02)
 
     def __call__(
@@ -190,35 +189,20 @@ class FixedSizeDetrTransform:
         orig_width, orig_height = image.size
         if self.augment and random.random() < 0.8:
             image = self.color_jitter(image)
-        # Keep aspect ratio, then place the resized image on the top-left corner
-        # of a fixed square canvas so every sample in a batch has the same shape.
-        scale = min(self.image_size / max(orig_width, 1), self.image_size / max(orig_height, 1))
-        if self.augment:
-            scale *= random.uniform(0.8, 1.0)
-        resized_width = max(1, int(round(orig_width * scale)))
-        resized_height = max(1, int(round(orig_height * scale)))
-
-        resized_image = image.resize((resized_width, resized_height), resample=Image.BILINEAR)
-        image_tensor = self.normalize(self.to_tensor(resized_image))
-
-        canvas = torch.zeros((3, self.image_size, self.image_size), dtype=image_tensor.dtype)
-        max_top = max(self.image_size - resized_height, 0)
-        max_left = max(self.image_size - resized_width, 0)
-        if self.augment:
-            top = random.randint(0, max_top) if max_top > 0 else 0
-            left = random.randint(0, max_left) if max_left > 0 else 0
-        else:
-            top = 0
-            left = 0
-        canvas[:, top : top + resized_height, left : left + resized_width] = image_tensor
-
-        mask = torch.ones((self.image_size, self.image_size), dtype=torch.bool)
-        mask[top : top + resized_height, left : left + resized_width] = False
+        scale = 1.0
+        resized_width = max(1, int(orig_width))
+        resized_height = max(1, int(orig_height))
+        top = 0
+        left = 0
+        image_tensor = self.normalize(self.to_tensor(image))
+        canvas_height = resized_height
+        canvas_width = resized_width
+        mask = torch.zeros((canvas_height, canvas_width), dtype=torch.bool)
 
         target: dict[str, Tensor] = {
             "image_id": torch.tensor(image_id, dtype=torch.int64),
             "orig_size": torch.tensor([orig_height, orig_width], dtype=torch.int64),
-            "size": torch.tensor([self.image_size, self.image_size], dtype=torch.int64),
+            "size": torch.tensor([canvas_height, canvas_width], dtype=torch.int64),
             "resized_size": torch.tensor([resized_height, resized_width], dtype=torch.int64),
             "scale": torch.tensor(scale, dtype=torch.float32),
             "offset": torch.tensor([top, left], dtype=torch.int64),
@@ -228,21 +212,23 @@ class FixedSizeDetrTransform:
             target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
             target["boxes_abs"] = torch.zeros((0, 4), dtype=torch.float32)
             target["labels"] = torch.zeros((0,), dtype=torch.int64)
-            return canvas, mask, target
+            return image_tensor, mask, target
 
         scaled_boxes_xywh = boxes_xywh.clone().float()
         scaled_boxes_xywh[:, :4] *= scale
         boxes_abs = box_xywh_to_xyxy(scaled_boxes_xywh)
         boxes_abs[:, 0::2] += float(left)
         boxes_abs[:, 1::2] += float(top)
-        boxes_abs = clip_xyxy_to_image(boxes_abs, float(self.image_size), float(self.image_size))
-        # DETR predicts normalized cx, cy, w, h values, so ground-truth boxes are
-        # converted to that format and divided by the fixed canvas size.
-        boxes_norm = box_xyxy_to_cxcywh(boxes_abs) / float(self.image_size)
+        boxes_abs = clip_xyxy_to_image(boxes_abs, float(canvas_width), float(canvas_height))
+        boxes_norm = box_xyxy_to_cxcywh(boxes_abs)
+        boxes_norm[:, 0] /= float(canvas_width)
+        boxes_norm[:, 2] /= float(canvas_width)
+        boxes_norm[:, 1] /= float(canvas_height)
+        boxes_norm[:, 3] /= float(canvas_height)
 
         target["boxes_abs"] = boxes_abs
         target["boxes"] = boxes_norm
-        return canvas, mask, target
+        return image_tensor, mask, target
 
 
 class CocoDigitDataset(Dataset):
@@ -312,7 +298,38 @@ class TestDigitDataset(Dataset):
 
 def detr_collate_fn(batch: list[tuple[Tensor, Tensor, dict[str, Tensor]]]) -> tuple[Tensor, Tensor, list[dict[str, Tensor]]]:
     images, masks, targets = zip(*batch)
-    return torch.stack(images, dim=0), torch.stack(masks, dim=0), list(targets)
+    max_height = max(int(image.shape[-2]) for image in images)
+    max_width = max(int(image.shape[-1]) for image in images)
+
+    padded_images: list[Tensor] = []
+    padded_masks: list[Tensor] = []
+    updated_targets: list[dict[str, Tensor]] = []
+
+    for image, mask, target in zip(images, masks, targets):
+        height = int(image.shape[-2])
+        width = int(image.shape[-1])
+        padded_image = torch.zeros((image.shape[0], max_height, max_width), dtype=image.dtype)
+        padded_image[:, :height, :width] = image
+        padded_mask = torch.ones((max_height, max_width), dtype=mask.dtype)
+        padded_mask[:height, :width] = mask
+
+        updated_target = dict(target)
+        updated_target["size"] = torch.tensor([max_height, max_width], dtype=torch.int64)
+        if updated_target["boxes_abs"].numel() > 0:
+            boxes_norm = box_xyxy_to_cxcywh(updated_target["boxes_abs"])
+            boxes_norm[:, 0] /= float(max_width)
+            boxes_norm[:, 2] /= float(max_width)
+            boxes_norm[:, 1] /= float(max_height)
+            boxes_norm[:, 3] /= float(max_height)
+            updated_target["boxes"] = boxes_norm
+        else:
+            updated_target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
+
+        padded_images.append(padded_image)
+        padded_masks.append(padded_mask)
+        updated_targets.append(updated_target)
+
+    return torch.stack(padded_images, dim=0), torch.stack(padded_masks, dim=0), updated_targets
 
 
 class Backbone(nn.Module):
@@ -821,7 +838,6 @@ def postprocess_predictions(
     targets: list[dict[str, Tensor]],
     score_threshold: float,
     top_k: int,
-    image_size: int,
     nms_iou_threshold: float,
 ) -> list[list[dict[str, float]]]:
     pred_logits = outputs["pred_logits"].softmax(-1)
@@ -831,9 +847,10 @@ def postprocess_predictions(
     for batch_idx in range(pred_logits.shape[0]):
         probs = pred_logits[batch_idx, :, :-1]
         scores, labels = probs.max(dim=-1)
-        # Model outputs are normalized relative to the padded square canvas, so
-        # decode them back to absolute xyxy coordinates on that canvas first.
-        boxes_xyxy = box_cxcywh_to_xyxy(pred_boxes[batch_idx]) * float(image_size)
+        padded_height = int(targets[batch_idx]["size"][0].item())
+        padded_width = int(targets[batch_idx]["size"][1].item())
+        scale_factors = pred_boxes[batch_idx].new_tensor([padded_width, padded_height, padded_width, padded_height])
+        boxes_xyxy = box_cxcywh_to_xyxy(pred_boxes[batch_idx]) * scale_factors
 
         scale = float(targets[batch_idx]["scale"].item())
         orig_height = int(targets[batch_idx]["orig_size"][0].item())
@@ -895,7 +912,6 @@ def generate_predictions(
     device: torch.device,
     score_threshold: float,
     top_k: int,
-    image_size: int,
     nms_iou_threshold: float,
     amp_enabled: bool,
 ) -> tuple[list[dict[str, float]], PredictionScoreSummary]:
@@ -915,7 +931,6 @@ def generate_predictions(
             targets=targets,
             score_threshold=score_threshold,
             top_k=top_k,
-            image_size=image_size,
             nms_iou_threshold=nms_iou_threshold,
         )
         for sample_preds in batch_predictions:
@@ -1165,7 +1180,6 @@ def run_prediction_with_model(
         device=device,
         score_threshold=args.score_threshold,
         top_k=args.top_k,
-        image_size=args.image_size,
         nms_iou_threshold=args.nms_iou_threshold,
         amp_enabled=args.amp and device.type == "cuda",
     )
@@ -1293,7 +1307,6 @@ def run_train(args: argparse.Namespace) -> None:
                     device=device,
                     score_threshold=args.score_threshold,
                     top_k=args.top_k,
-                    image_size=args.image_size,
                     nms_iou_threshold=args.nms_iou_threshold,
                     amp_enabled=amp_enabled,
                 )
@@ -1485,7 +1498,7 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument(
         "--no-augmentation",
         action="store_true",
-        help="Disable train-time color jitter plus scale/translation augmentation.",
+        help="Disable train-time color jitter augmentation.",
     )
 
     predict_parser = subparsers.add_parser("predict", help="Run inference and export pred.json.")

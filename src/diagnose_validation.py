@@ -4,6 +4,12 @@
 This script keeps diagnosis separate from the main train/predict entry points.
 It evaluates both checkpoints on the same validation annotations, reports a
 small set of metrics, and saves side-by-side qualitative visualizations.
+
+Usage example:
+python src/diagnose_validation.py \
+  --baseline-checkpoint checkpoints/dn_deformable_freeze_transformer/best.pth \
+  --dn-checkpoint checkpoints/dn_deformable_digits/best.pth \
+  --output-dir diagnostics/run3
 """
 
 from __future__ import annotations

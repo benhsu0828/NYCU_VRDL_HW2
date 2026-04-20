@@ -47,30 +47,32 @@ This report follows the ECCV-style citation format~\cite{eccv_guideline} and sum
 % baseline | thr=0.6 | top_k=4 | nms=0.3 | mAP=0.37859099224046894 | AP50=0.7989752286606853 | avg_pred=2.164 | class_error=0.0917 | loss_ce=0.2819 | loss_bbox=0.0593 | loss_giou=0.2666
 % dn_detr | thr=0.2 | top_k=4 | nms=0.3 | mAP=0.002142713475655843 | AP50=0.007419773879386101 | avg_pred=1.525 | class_error=78.3956 | loss_ce=0.5094 | loss_bbox=0.0878 | loss_giou=0.3605
 
-\subsection{Data Augmentation Strategy}
-目前的 baseline 與 DN-DETR 實驗尚未正式加入 data augmentation，因此本報告中的結果主要反映模型架構、matching 與 loss 設計對效能的影響，而不是資料增強後的最終上限。後續我預計補上資料增強流程，例如亮度與對比抖動、縮放與平移，以及針對類別不平衡問題設計的 class-balanced augmentation，進一步觀察其對分類穩定度與小物件辨識能力的幫助。
+\subsection{Data Processing and Augmentation}
+在資料處理上，後期我主要聚焦於 DN-DETR 的調整。baseline 採用較溫和的增強策略，以 photometric 與輕量幾何擾動為主，包括 brightness/contrast jitter，以及在固定輸入尺寸下的輕度隨機縮放與平移；同時搭配 class-balanced supervision，以提升分類學習穩定性。
 
-針對資料中類別分佈不均與分類表現偏弱的問題，baseline 也加入了較強的 classification supervision，包括 class-balanced cross-entropy weight、可調整的 classification loss coefficient，以及 label smoothing。這些改動的目標，是避免模型過度偏向 bounding box regression，而忽略了數字類別本身的辨識。目前這些改動已經在 baseline 上進行測試，後續會再加入到 DN-DETR 的實驗中，觀察是否能改善其分類不穩定的問題。
+在 DN-DETR 方面，我曾測試canvas expansion + Gaussian noise的增強方式，也就是將原圖隨機貼到原圖放大固定倍率的畫布上，並以 Gaussian noise 填補背景（offline 與 online 版本皆有實驗）。結果顯示，當畫布放大倍率超過 $1.1\times$ 時，模型幾乎無法有效學習；將倍率降到不超過 $1.1\times$ 後雖可收斂，但即使訓練至 100 epochs，最終 mAP 仍未優於不使用此增強的設定。因此，最終的 DN-DETR 主線模型不採用 canvas expansion + Gaussian noise，而是沿用與 baseline 一致的前處理設定。
+
+在後續除錯過程中，我發現 DN-DETR 的一個關鍵瓶頸並不只來自 loss 或 matching 設定，而是來自影像前處理策略。原本我將所有影像直接 resize 並 pad 成固定的 $720 \times 720$ 正方形輸入，雖然這是一開始最直覺統一資料格式的方式，但是這樣的設定會讓原本小張的圖片上的數字被放到到很多pixel，這樣子一個query就會很難區分這塊是數字還是背景；其次，因為有很多圖片都是小尺寸的，為了配合大圖片而放大的話，整體計算量也會顯著上升，使訓練速度變慢。在這種設定下，DN-DETR 的 class\_error 長期維持在很高的區間，分類幾乎沒有穩定學起來。
+
+因此，我將 DN-DETR  train/valid/test的資料流程改成 batch-wise dynamic padding，也就是先保留原圖大小不做resize，然後將同一個 batch 中的影像 pad 到該 batch 最大圖片的長寬，而不再強制每張圖都 pad 到固定的 $720 \times 720$。這項調整能減少大量無效背景，並改善早期訓練穩定度。
+
 \subsection{Model Variants}
 \label{sec:model}
 本次實作主要比較兩個方向：自建的 baseline DETR，以及後續嘗試導入的 DN-DETR。
 
-一開始直接引入DN-DETR來使用，結果預測出的分數很差，跟baseline相比才發現不只有框預測錯誤，可以從AP50看出，大多數時候是有抓到東西的，但是精準度還是不構，並且分類非常差，class_error 高到接近沒學會，avg_pred=1.525 並不算完全沒輸出，但輸出的東西大多是錯的。
-
-
-在 baseline中，我嘗試改版成像是DN-DETR一樣讓transformer可以得到多維度的特徵，我額外將三個 fused feature levels 全部展平成 transformer encoder tokens，而不是只取單一最高解析度特徵圖送入 encoder。具體而言，每個尺度的特徵圖都會先搭配對應的 mask 與 sine positional embedding，再加入一個 learnable level embedding，用來告訴 transformer 該 token 來自哪一個 feature level。最後再將不同尺度的 tokens 串接成單一序列送入 encoder。這樣的設計可以讓 decoder query 同時存取高解析度的局部細節與低解析度的高階語意，理論上對小型數字目標的分類與定位都有幫助。但是這樣讓我的訓練時間大幅度增加。
-
-所以後來將 backbone 輸出的多尺度特徵改為標準 FPN 風格的融合方式。首先，對每一層 feature map 使用 $1 \times 1$ convolution 將通道數對齊到相同維度；接著，將較深層的特徵圖上採樣到較高解析度後，與對應的淺層特徵直接相加；最後，再接上一個 $3 \times 3$ convolution 對融合後的特徵做平滑。這樣的設計可以在維持計算成本相對穩定的情況下，同時保留深層語意資訊與高解析度細節，對小型數字目標較有幫助。
+在 baseline中，我嘗試改版成像是DN-DETR一樣讓transformer可以得到多維度的特徵，我額外將三個 fused feature levels 全部展平成 transformer encoder tokens，而不是只取單一最高解析度特徵圖送入 encoder。具體而言，每個尺度的特徵圖都會先搭配對應的 mask 與 sine positional embedding，再加入一個 learnable level embedding，用來告訴 transformer 該 token 來自哪一個 feature level。最後再將不同尺度的 tokens 串接成單一序列送入 encoder。這樣的設計可以讓 decoder query 同時存取高解析度的局部細節與低解析度的高階語意，但是這樣讓我的訓練時間大幅度增加。所以後來將 backbone 輸出的多尺度特徵改為標準 FPN 風格的融合方式。首先，對每一層 feature map 使用 $1 \times 1$ convolution 將通道數對齊到相同維度；接著，將較深層的特徵圖上採樣到較高解析度後，與對應的淺層特徵直接相加；最後，再接上一個 $3 \times 3$ convolution 對融合後的特徵做平滑。這樣的設計可以在維持計算成本相對穩定的情況下，同時保留深層語意資訊與高解析度細節，對小型數字目標較有幫助。
 
 與先前直接將多個 feature levels 全部展平成 transformer tokens 的做法相比，FPN 式融合不需要讓 vanilla transformer 對所有尺度的 token 做 full attention，因此訓練時間顯著較短，也更適合作為目前 baseline 的主線設計。融合完成後，模型僅將最高解析度的 fused feature map 送入 encoder，讓 backbone 端受益於多尺度資訊，但避免 transformer 計算量大幅增加。
 
+一開始直接引入DN-DETR來使用，結果預測出的分數很差，跟baseline相比才發現不只有框預測錯誤，接著我從AP50看出大多數時候是有抓到東西的，但是框出物體的精準度還是不構，並且分類非常差。
 相較之下，DN-DETR 雖然理論上具有更快收斂與更穩定 training signal 的優勢，但我目前直接套用後的結果不理想。從驗證結果來看，模型並非完全沒有輸出框，而是常常能偵測到物體存在，但在分類上明顯失敗，導致整體 mAP 與 AP50 都遠低於 baseline。因此，現階段 baseline 仍是較穩定且可持續改進的主線模型。
-
 
 \subsection{Hyperparameters}
 \label{sec:hparam}
 
 目前 baseline 的主要訓練設定為 80 個 epochs、主幹學習率 $5 \times 10^{-5}$、backbone 學習率 $5 \times 10^{-6}$、weight decay 為 $10^{-4}$，並在第 60 個 epoch 後將 learning rate 乘上 0.1。除此之外，為了穩定訓練，我也使用 gradient clipping，並搭配 pretrained DETR checkpoint 作為 warm start。由於目前仍在以 baseline 架構調整為主，本報告尚未使用完整的 Optuna 自動化搜尋結果作為最終設定，後續若加入 data augmentation 與更多模型變體，會再統一進行超參數調整。
+
+對於 DN-DETR，除了 scalar、label noise、box noise 與 learning rate 等超參數外，我也額外測試了輸入前處理方式。實驗顯示，固定方形輸入會引入過多背景並拖慢收斂；改為 batch-wise dynamic padding 後可改善訓練穩定性。同時，``canvas 放大 + 隨機貼圖 + Gaussian noise'' 雖在小幅放大（約 $1.1\times$）時可讓收斂稍微順一些，但最終指標仍未超越無該增強版本，因此主線設定不採用此強增強。
 
 \section{Results}
 \label{sec:results}

@@ -27,6 +27,22 @@ gdown https://drive.google.com/uc?id=13JXJ_hIdcloC63sS-vF3wFQLsUP1sMz5
 tar -xvf nycu-hw2-data.tar.gz
 ```
 
+## Build Offline Canvas-Aug Train Set
+
+Generate a new training image folder and a matching COCO json (orig + 1 canvas copy per image):
+
+```bash
+./docker/run_dn_detr.sh python src/data_augmentation.py \
+  --input-image-dir nycu-hw2-data/train \
+  --input-json nycu-hw2-data/train.json \
+  --output-image-dir nycu-hw2-data/train_canvas_offline \
+  --output-json nycu-hw2-data/train_canvas_offline.json \
+  --copies-per-image 2 \
+  --canvas-scale-factor 1.1 \
+  --random-expand-noise-std 0.04 \
+  --overwrite
+```
+
 ## Train And Predict
 
 If you do not already have a trained checkpoint, use `train` first. You can also train and then automatically run inference in the same command with `--predict-after-train`.

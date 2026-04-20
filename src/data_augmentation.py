@@ -1,499 +1,271 @@
 #!/usr/bin/env python3
-"""Offline data augmentation for image classification.
+"""Offline canvas augmentation for COCO detection training data.
 
-This script expands each training image into a fixed number of images.
-Default behavior is 1 -> 3 (one original copy + two augmented copies).
+This script builds a new train image folder plus a matching COCO JSON by
+copying each source image once (orig) and generating extra canvas-augmented
+copies with synchronized bbox offsets.
 """
 
+from __future__ import annotations
+
 import argparse
-import math
+import json
 import random
 import shutil
 from pathlib import Path
 
-import torch
-from PIL import Image, ImageDraw, ImageFile
-from torchvision import transforms
+from PIL import Image, ImageFile
 from tqdm import tqdm
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Offline augmentation: expand dataset size per image.")
-    parser.add_argument("--input-dir", type=Path, required=True, help="Input train directory, e.g. ./data/train")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Output directory, e.g. ./data_aug/train")
+    parser = argparse.ArgumentParser(description="COCO detection offline canvas augmentation.")
+    parser.add_argument("--input-image-dir", type=Path, required=True, help="Source train image directory.")
+    parser.add_argument("--input-json", type=Path, required=True, help="Source COCO train annotation json.")
+    parser.add_argument("--output-image-dir", type=Path, required=True, help="Output image directory.")
+    parser.add_argument("--output-json", type=Path, required=True, help="Output COCO annotation json.")
     parser.add_argument(
         "--copies-per-image",
         type=int,
-        default=3,
-        help="Total output images per source image (default: 3).",
-    )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Delete output directory first if it already exists.",
+        default=2,
+        help="Total copies per source image. First copy is orig; remaining copies are canvas-aug (default: 2).",
     )
     parser.add_argument(
-        "--mixup-copies-per-image",
-        type=int,
-        default=0,
-        help="Additional same-class mixup-blend images per source image (default: 0).",
-    )
-    parser.add_argument(
-        "--mixup-alpha",
+        "--canvas-scale-factor",
         type=float,
-        default=0.2,
-        help="Beta(alpha, alpha) used by offline same-class mixup blend.",
+        default=1.2,
+        help="Canvas size multiplier for augmented copies (default: 1.2).",
     )
     parser.add_argument(
-        "--resize-short-side",
-        type=int,
-        default=256,
-        help="Resize short side to this value before optional center crop. Set <= 0 to disable.",
+        "--random-expand-noise-std",
+        type=float,
+        default=0.08,
+        help="Noise std in normalized scale [0,1]. Pixel std uses std*255 (default: 0.08).",
     )
-    parser.add_argument(
-        "--center-crop-size",
-        type=int,
-        default=224,
-        help="Center crop size after resizing. Set <= 0 to disable.",
-    )
-    parser.add_argument(
-        "--deterministic-only",
-        action="store_true",
-        help="Disable random offline augmentation and only apply deterministic preprocess.",
-    )
-    parser.add_argument(
-        "--balance-to-max2x",
-        action="store_true",
-        help="Balance every class to 2x of the largest source class count.",
-    )
-    parser.add_argument(
-        "--v4-fixed-1p5x",
-        action="store_true",
-        help=(
-            "Generate a fixed 1.5x train set per class for V4 policy: "
-            "0.5x plain + 0.5x same-class mixup + 0.5x random erasing."
-        ),
-    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--overwrite", action="store_true", help="Remove output paths before generation.")
     return parser.parse_args()
 
 
-def build_augmentation_transform() -> transforms.Compose:
-    return transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25, hue=0.08)],
-                p=0.8,
-            ),
-            transforms.RandomApply(
-                [
-                    transforms.RandomAffine(
-                        degrees=12,
-                        translate=(0.05, 0.05),
-                        scale=(0.9, 1.1),
-                        shear=5,
-                    )
-                ],
-                p=0.7,
-            ),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.2))], p=0.3),
-        ]
-    )
+def load_coco(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        coco = json.load(f)
+    required = {"images", "annotations", "categories"}
+    missing = required.difference(coco.keys())
+    if missing:
+        raise ValueError(f"Input json missing keys: {sorted(missing)}")
+    return coco
 
 
-def build_deterministic_transform(resize_short_side: int, center_crop_size: int) -> transforms.Compose | None:
-    steps = []
-    if resize_short_side > 0:
-        steps.append(transforms.Resize(resize_short_side))
-    if center_crop_size > 0:
-        steps.append(transforms.CenterCrop(center_crop_size))
-    if not steps:
+def prepare_output_paths(output_image_dir: Path, output_json: Path, overwrite: bool) -> None:
+    if overwrite and output_image_dir.exists():
+        shutil.rmtree(output_image_dir)
+    output_image_dir.mkdir(parents=True, exist_ok=True)
+
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    if overwrite and output_json.exists():
+        output_json.unlink()
+
+
+def build_annotations_by_image(annotations: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for ann in annotations:
+        image_id = int(ann["image_id"])
+        grouped.setdefault(image_id, []).append(ann)
+    return grouped
+
+
+def load_rgb(path: Path) -> Image.Image:
+    with Image.open(path) as image:
+        return image.convert("RGB")
+
+
+def make_noise_canvas(height: int, width: int, noise_std: float) -> Image.Image:
+    pixel_std = max(0.0, float(noise_std)) * 255.0
+    if pixel_std <= 0.0:
+        return Image.new("RGB", (width, height), color=(127, 127, 127))
+
+    # effect_noise returns grayscale Gaussian-like noise centered around mid-gray.
+    noise_gray = Image.effect_noise((width, height), sigma=pixel_std)
+    return Image.merge("RGB", (noise_gray, noise_gray, noise_gray))
+
+
+def clip_bbox_xywh(bbox: list[float], width: int, height: int) -> list[float] | None:
+    x, y, w, h = [float(v) for v in bbox]
+    x0 = max(0.0, min(x, float(width)))
+    y0 = max(0.0, min(y, float(height)))
+    x1 = max(0.0, min(x + w, float(width)))
+    y1 = max(0.0, min(y + h, float(height)))
+    new_w = x1 - x0
+    new_h = y1 - y0
+    if new_w <= 0.0 or new_h <= 0.0:
         return None
-    return transforms.Compose(steps)
+    return [x0, y0, new_w, new_h]
 
 
-def collect_images(class_dir: Path) -> list[Path]:
-    return sorted(
-        [p for p in class_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
-    )
+def remap_annotations(
+    source_annotations: list[dict],
+    new_image_id: int,
+    ann_id_start: int,
+    dx: int,
+    dy: int,
+    out_width: int,
+    out_height: int,
+) -> tuple[list[dict], int]:
+    new_annotations: list[dict] = []
+    next_ann_id = ann_id_start
 
-
-def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
-    if output_dir.exists() and overwrite:
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-
-def save_rgb_jpg(image: Image.Image, path: Path) -> None:
-    image.convert("RGB").save(path, format="JPEG", quality=95)
-
-
-def sample_mix_ratio(alpha: float) -> float:
-    if alpha <= 0:
-        return 1.0
-    return torch.distributions.Beta(alpha, alpha).sample().item()
-
-
-def mix_images_same_class(image_a: Image.Image, image_b: Image.Image, alpha: float) -> Image.Image:
-    lam = sample_mix_ratio(alpha)
-
-    # Use the anchor image size as the canonical size for blending.
-    if image_b.size != image_a.size:
-        if hasattr(Image, "Resampling"):
-            image_b = image_b.resize(image_a.size, resample=Image.Resampling.BILINEAR)
-        else:
-            image_b = image_b.resize(image_a.size, resample=Image.BILINEAR)
-
-    tensor_a = transforms.ToTensor()(image_a)
-    tensor_b = transforms.ToTensor()(image_b)
-    mixed = lam * tensor_a + (1.0 - lam) * tensor_b
-    return transforms.ToPILImage()(mixed.clamp(0.0, 1.0))
-
-
-def load_rgb_image(path: Path) -> Image.Image:
-    with Image.open(path) as img:
-        return img.convert("RGB")
-
-
-def apply_deterministic(image: Image.Image, deterministic_transform: transforms.Compose | None) -> Image.Image:
-    if deterministic_transform is None:
-        return image
-    return deterministic_transform(image)
-
-
-def apply_random_erasing(
-    image: Image.Image,
-    min_area_ratio: float = 0.03,
-    max_area_ratio: float = 0.12,
-    min_aspect_ratio: float = 0.3,
-    max_aspect_ratio: float = 3.3,
-) -> Image.Image:
-    width, height = image.size
-    area = width * height
-    if area <= 0:
-        return image
-
-    out = image.copy()
-    draw = ImageDraw.Draw(out)
-
-    for _ in range(10):
-        target_area = random.uniform(min_area_ratio, max_area_ratio) * area
-        aspect_ratio = random.uniform(min_aspect_ratio, max_aspect_ratio)
-        erase_w = int(round(math.sqrt(target_area * aspect_ratio)))
-        erase_h = int(round(math.sqrt(target_area / aspect_ratio)))
-
-        if erase_w < width and erase_h < height and erase_w > 0 and erase_h > 0:
-            x0 = random.randint(0, width - erase_w)
-            y0 = random.randint(0, height - erase_h)
-            fill = (
-                random.randint(0, 255),
-                random.randint(0, 255),
-                random.randint(0, 255),
-            )
-            draw.rectangle([x0, y0, x0 + erase_w, y0 + erase_h], fill=fill)
-            return out
-
-    return out
-
-
-def save_class_v4_fixed_1p5x(
-    class_dir: Path,
-    output_class_dir: Path,
-    image_paths: list[Path],
-    deterministic_transform: transforms.Compose | None,
-    mixup_alpha: float,
-) -> int:
-    generated = 0
-    seq = 0
-
-    target_total = max(1, int(round(1.5 * len(image_paths))))
-    base = target_total // 3
-    rem = target_total % 3
-    plain_count = base + (1 if rem > 0 else 0)
-    mix_count = base + (1 if rem > 1 else 0)
-    erase_count = base
-
-    def load_base_image(path: Path) -> Image.Image:
-        img = load_rgb_image(path)
-        return apply_deterministic(img, deterministic_transform)
-
-    for _ in range(plain_count):
-        image_path = random.choice(image_paths)
-        seq += 1
-        img = load_base_image(image_path)
-        output_plain = output_class_dir / f"{seq:06d}_{image_path.stem}_plain.jpg"
-        save_rgb_jpg(img, output_plain)
-        generated += 1
-
-    for _ in range(mix_count):
-        image_a_path = random.choice(image_paths)
-        image_b_path = random.choice(image_paths)
-        seq += 1
-        image_a = load_base_image(image_a_path)
-        image_b = load_base_image(image_b_path)
-        if len(image_paths) > 1 and mixup_alpha > 0:
-            out_img = mix_images_same_class(image_a, image_b, mixup_alpha)
-            suffix = "mix"
-        else:
-            out_img = image_a
-            suffix = "plain"
-        output_mix = output_class_dir / f"{seq:06d}_{image_a_path.stem}_{suffix}.jpg"
-        save_rgb_jpg(out_img, output_mix)
-        generated += 1
-
-    for _ in range(erase_count):
-        image_path = random.choice(image_paths)
-        seq += 1
-        img = load_base_image(image_path)
-        out_img = apply_random_erasing(img)
-        output_erase = output_class_dir / f"{seq:06d}_{image_path.stem}_erase.jpg"
-        save_rgb_jpg(out_img, output_erase)
-        generated += 1
-
-    print(
-        f"V4 class {class_dir.name}: target={target_total}, "
-        f"plain={plain_count}, mix={mix_count}, erase={erase_count}"
-    )
-    return generated
-
-
-def save_class_fixed_copies(
-    class_dir: Path,
-    output_class_dir: Path,
-    image_paths: list[Path],
-    copies_per_image: int,
-    mixup_copies_per_image: int,
-    mixup_alpha: float,
-    augment_transform: transforms.Compose,
-    deterministic_transform: transforms.Compose | None,
-    deterministic_only: bool,
-) -> int:
-    generated = 0
-
-    for idx, image_path in enumerate(tqdm(image_paths, desc=f"Augment class {class_dir.name}"), start=1):
-        sample_prefix = f"{idx:06d}_{image_path.stem}"
-        img = load_rgb_image(image_path)
-        img = apply_deterministic(img, deterministic_transform)
-
-        output_original = output_class_dir / f"{sample_prefix}_orig.jpg"
-        save_rgb_jpg(img, output_original)
-        generated += 1
-
-        if deterministic_only:
+    for ann in source_annotations:
+        bbox = ann.get("bbox", None)
+        if bbox is None or len(bbox) != 4:
             continue
 
-        for aug_idx in range(1, copies_per_image):
-            aug_img = augment_transform(img.copy())
-            output_aug = output_class_dir / f"{sample_prefix}_aug{aug_idx}.jpg"
-            save_rgb_jpg(aug_img, output_aug)
-            generated += 1
+        shifted_bbox = [float(bbox[0]) + dx, float(bbox[1]) + dy, float(bbox[2]), float(bbox[3])]
+        clipped = clip_bbox_xywh(shifted_bbox, out_width, out_height)
+        if clipped is None:
+            continue
 
-        if mixup_copies_per_image > 0 and len(image_paths) > 1:
-            for mix_idx in range(1, mixup_copies_per_image + 1):
-                partner_path = random.choice(image_paths)
-                partner_img = load_rgb_image(partner_path)
-                partner_img = apply_deterministic(partner_img, deterministic_transform)
-                mixed_img = mix_images_same_class(img, partner_img, mixup_alpha)
-                output_mix = output_class_dir / f"{sample_prefix}_mix{mix_idx}.jpg"
-                save_rgb_jpg(mixed_img, output_mix)
-                generated += 1
+        next_ann_id += 1
+        new_annotations.append(
+            {
+                "id": next_ann_id,
+                "image_id": new_image_id,
+                "bbox": [round(clipped[0], 4), round(clipped[1], 4), round(clipped[2], 4), round(clipped[3], 4)],
+                "category_id": int(ann["category_id"]),
+                "area": round(clipped[2] * clipped[3], 4),
+                "iscrowd": int(ann.get("iscrowd", 0)),
+            }
+        )
 
-    return generated
-
-
-def save_class_balanced(
-    class_dir: Path,
-    output_class_dir: Path,
-    image_paths: list[Path],
-    target_count: int,
-    augment_transform: transforms.Compose,
-    deterministic_transform: transforms.Compose | None,
-    deterministic_only: bool,
-    mixup_alpha: float,
-) -> int:
-    generated = 0
-    seq = 0
-
-    # Keep one deterministic base copy for each source first.
-    for image_path in image_paths:
-        seq += 1
-        img = load_rgb_image(image_path)
-        img = apply_deterministic(img, deterministic_transform)
-        output_original = output_class_dir / f"{seq:06d}_{image_path.stem}_orig.jpg"
-        save_rgb_jpg(img, output_original)
-        generated += 1
-        if generated >= target_count:
-            return generated
-
-    if deterministic_only:
-        # Fallback for deterministic-only mode: repeat deterministic copies to hit target.
-        while generated < target_count:
-            image_path = random.choice(image_paths)
-            seq += 1
-            img = load_rgb_image(image_path)
-            img = apply_deterministic(img, deterministic_transform)
-            output_copy = output_class_dir / f"{seq:06d}_{image_path.stem}_copy.jpg"
-            save_rgb_jpg(img, output_copy)
-            generated += 1
-        return generated
-
-    while generated < target_count:
-        image_path = random.choice(image_paths)
-        seq += 1
-        base_img = load_rgb_image(image_path)
-        base_img = apply_deterministic(base_img, deterministic_transform)
-
-        can_mix = len(image_paths) > 1 and mixup_alpha > 0
-        if can_mix and random.random() < 0.35:
-            partner_path = random.choice(image_paths)
-            partner_img = load_rgb_image(partner_path)
-            partner_img = apply_deterministic(partner_img, deterministic_transform)
-            out_img = mix_images_same_class(base_img, partner_img, mixup_alpha)
-            suffix = "mix"
-        else:
-            out_img = augment_transform(base_img.copy())
-            suffix = "aug"
-
-        output_path = output_class_dir / f"{seq:06d}_{image_path.stem}_{suffix}.jpg"
-        save_rgb_jpg(out_img, output_path)
-        generated += 1
-
-    return generated
+    return new_annotations, next_ann_id
 
 
-def save_flat_deterministic(
-    input_dir: Path,
-    output_dir: Path,
-    deterministic_transform: transforms.Compose | None,
-) -> tuple[int, int]:
-    image_paths = collect_images(input_dir)
-    if not image_paths:
-        raise RuntimeError(f"No images found in flat directory: {input_dir}")
+def run_augmentation(args: argparse.Namespace) -> dict:
+    if args.copies_per_image < 1:
+        raise ValueError("--copies-per-image must be >= 1")
+    if args.canvas_scale_factor < 1.0:
+        raise ValueError("--canvas-scale-factor must be >= 1.0")
 
-    generated = 0
-    for image_path in tqdm(image_paths, desc="Preprocess flat dataset"):
-        img = load_rgb_image(image_path)
-        img = apply_deterministic(img, deterministic_transform)
-        output_path = output_dir / f"{image_path.stem}.jpg"
-        save_rgb_jpg(img, output_path)
-        generated += 1
+    random.seed(args.seed)
 
-    return len(image_paths), generated
+    coco = load_coco(args.input_json)
+    images = coco["images"]
+    annotations_by_image = build_annotations_by_image(coco["annotations"])
+
+    prepare_output_paths(args.output_image_dir, args.output_json, args.overwrite)
+
+    new_images: list[dict] = []
+    new_annotations: list[dict] = []
+
+    next_image_id = 0
+    next_ann_id = 0
+
+    for image_info in tqdm(images, desc="Generating offline canvas aug"):
+        src_image_id = int(image_info["id"])
+        src_file_name = str(image_info["file_name"])
+        src_path = args.input_image_dir / src_file_name
+        if not src_path.exists():
+            raise FileNotFoundError(f"Image not found: {src_path}")
+
+        src = load_rgb(src_path)
+        src_w, src_h = src.size
+        src_anns = annotations_by_image.get(src_image_id, [])
+        stem = Path(src_file_name).stem
+
+        for copy_idx in range(args.copies_per_image):
+            is_orig = copy_idx == 0
+
+            if is_orig:
+                out = src.copy()
+                out_w, out_h = src_w, src_h
+                dx, dy = 0, 0
+                suffix = "orig"
+            else:
+                out_w = max(src_w, int(round(src_w * args.canvas_scale_factor)))
+                out_h = max(src_h, int(round(src_h * args.canvas_scale_factor)))
+                max_left = out_w - src_w
+                max_top = out_h - src_h
+                dx = random.randint(0, max_left) if max_left > 0 else 0
+                dy = random.randint(0, max_top) if max_top > 0 else 0
+
+                out = make_noise_canvas(out_h, out_w, args.random_expand_noise_std)
+                out.paste(src, (dx, dy))
+                suffix = f"canvas{copy_idx}"
+
+            next_image_id += 1
+            out_name = f"{next_image_id:06d}_{stem}_{suffix}.png"
+            out_path = args.output_image_dir / out_name
+            out.save(out_path)
+
+            new_images.append(
+                {
+                    "id": next_image_id,
+                    "file_name": out_name,
+                    "height": int(out_h),
+                    "width": int(out_w),
+                }
+            )
+
+            remapped, next_ann_id = remap_annotations(
+                source_annotations=src_anns,
+                new_image_id=next_image_id,
+                ann_id_start=next_ann_id,
+                dx=dx,
+                dy=dy,
+                out_width=out_w,
+                out_height=out_h,
+            )
+            new_annotations.extend(remapped)
+
+    out_coco = {
+        "images": new_images,
+        "annotations": new_annotations,
+        "categories": coco["categories"],
+    }
+
+    with args.output_json.open("w", encoding="utf-8") as f:
+        json.dump(out_coco, f)
+
+    return out_coco
+
+
+def validate_coco(coco: dict, sample_count: int = 20) -> None:
+    image_meta = {int(img["id"]): img for img in coco["images"]}
+    anns = coco["annotations"]
+
+    bad = 0
+    if anns:
+        step = max(1, len(anns) // sample_count)
+        sampled = anns[::step][:sample_count]
+    else:
+        sampled = []
+
+    for ann in sampled:
+        image_id = int(ann["image_id"])
+        img = image_meta.get(image_id)
+        if img is None:
+            bad += 1
+            continue
+        x, y, w, h = [float(v) for v in ann["bbox"]]
+        iw, ih = float(img["width"]), float(img["height"])
+        valid = w > 0 and h > 0 and x >= 0 and y >= 0 and x + w <= iw + 1e-5 and y + h <= ih + 1e-5
+        if not valid:
+            bad += 1
+
+    print(f"Output images: {len(coco['images'])}")
+    print(f"Output annotations: {len(coco['annotations'])}")
+    print(f"Validation sample size: {len(sampled)}")
+    print(f"Invalid sampled bboxes: {bad}")
 
 
 def main() -> None:
     args = parse_args()
-
-    if args.copies_per_image < 1:
-        raise ValueError("--copies-per-image must be >= 1")
-    if args.mixup_copies_per_image < 0:
-        raise ValueError("--mixup-copies-per-image must be >= 0")
-    if args.v4_fixed_1p5x and args.balance_to_max2x:
-        raise ValueError("--v4-fixed-1p5x cannot be used with --balance-to-max2x")
-    if args.balance_to_max2x and args.deterministic_only:
-        print("[WARN] --balance-to-max2x with --deterministic-only will duplicate deterministic images.")
-    if not args.input_dir.exists():
-        raise FileNotFoundError(f"Input directory not found: {args.input_dir}")
-
-    random.seed(args.seed)
-
-    prepare_output_dir(args.output_dir, args.overwrite)
-    augment_transform = build_augmentation_transform()
-    deterministic_transform = build_deterministic_transform(args.resize_short_side, args.center_crop_size)
-
-    class_dirs = sorted([p for p in args.input_dir.iterdir() if p.is_dir()])
-    if not class_dirs:
-        if args.balance_to_max2x:
-            raise RuntimeError("--balance-to-max2x requires class subfolders under --input-dir")
-        if not args.deterministic_only:
-            raise RuntimeError(
-                "Flat input directory is supported only with --deterministic-only. "
-                "Use class subfolders for train augmentation."
-            )
-
-        total_source_images, total_generated_images = save_flat_deterministic(
-            input_dir=args.input_dir,
-            output_dir=args.output_dir,
-            deterministic_transform=deterministic_transform,
-        )
-        print("Preprocess finished.")
-        print(f"Input images:  {total_source_images}")
-        print(f"Output images: {total_generated_images}")
-        print(f"Expansion ratio: {total_generated_images / total_source_images:.2f}x")
-        return
-
-    class_to_images: dict[str, list[Path]] = {}
-    max_class_count = 0
-    for class_dir in class_dirs:
-        image_paths = collect_images(class_dir)
-        class_to_images[class_dir.name] = image_paths
-        max_class_count = max(max_class_count, len(image_paths))
-
-    if max_class_count == 0:
-        raise RuntimeError(f"No images found under class folders in {args.input_dir}")
-
-    total_source_images = 0
-    total_generated_images = 0
-
-    target_per_class = max_class_count * 2 if args.balance_to_max2x else None
-    if target_per_class is not None:
-        print(f"Class balancing enabled. Target per class: {target_per_class}")
-
-    for class_dir in class_dirs:
-        output_class_dir = args.output_dir / class_dir.name
-        output_class_dir.mkdir(parents=True, exist_ok=True)
-
-        image_paths = class_to_images[class_dir.name]
-        if not image_paths:
-            print(f"[WARN] Skip empty class folder: {class_dir}")
-            continue
-
-        total_source_images += len(image_paths)
-
-        if args.v4_fixed_1p5x:
-            generated = save_class_v4_fixed_1p5x(
-                class_dir=class_dir,
-                output_class_dir=output_class_dir,
-                image_paths=image_paths,
-                deterministic_transform=deterministic_transform,
-                mixup_alpha=args.mixup_alpha,
-            )
-        elif target_per_class is None:
-            generated = save_class_fixed_copies(
-                class_dir=class_dir,
-                output_class_dir=output_class_dir,
-                image_paths=image_paths,
-                copies_per_image=args.copies_per_image,
-                mixup_copies_per_image=args.mixup_copies_per_image,
-                mixup_alpha=args.mixup_alpha,
-                augment_transform=augment_transform,
-                deterministic_transform=deterministic_transform,
-                deterministic_only=args.deterministic_only,
-            )
-        else:
-            generated = save_class_balanced(
-                class_dir=class_dir,
-                output_class_dir=output_class_dir,
-                image_paths=image_paths,
-                target_count=target_per_class,
-                augment_transform=augment_transform,
-                deterministic_transform=deterministic_transform,
-                deterministic_only=args.deterministic_only,
-                mixup_alpha=args.mixup_alpha,
-            )
-
-        total_generated_images += generated
-
-    print("Augmentation finished.")
-    print(f"Input images:  {total_source_images}")
-    print(f"Output images: {total_generated_images}")
-    if total_source_images > 0:
-        print(f"Expansion ratio: {total_generated_images / total_source_images:.2f}x")
+    out_coco = run_augmentation(args)
+    validate_coco(out_coco, sample_count=20)
+    print(f"Saved images to: {args.output_image_dir}")
+    print(f"Saved json to: {args.output_json}")
 
 
 if __name__ == "__main__":
