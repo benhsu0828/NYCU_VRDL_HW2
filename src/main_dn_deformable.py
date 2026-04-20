@@ -127,6 +127,11 @@ def add_model_training_arguments(parser: argparse.ArgumentParser) -> None:
         default=PROJECT_ROOT / "R50_v2" / "checkpoint.pth",
         help="Optional pretrained DN-DETR checkpoint to warm-start model weights before fine-tuning.",
     )
+    parser.add_argument(
+        "--no-pretrained-checkpoint",
+        action="store_true",
+        help="Disable warm-start from DN-DETR checkpoint; keep only backbone pretrained initialization.",
+    )
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--eval-every-epoch", action="store_true")
     parser.add_argument(
@@ -197,6 +202,8 @@ def parse_args() -> argparse.Namespace:
     predict_parser.add_argument("--output", type=Path, default=DEFAULT_PRED_PATH)
 
     args = parser.parse_args()
+    if getattr(args, "no_pretrained_checkpoint", False):
+        args.pretrained_checkpoint = None
     args.dataset_file = "custom_coco"
     args.modelname = "dn_dab_deformable_detr"
     args.masks = False

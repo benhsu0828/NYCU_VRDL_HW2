@@ -124,27 +124,28 @@ Check the compiled operator:
 
   ./docker/run_dn_detr.sh python src/main_dn_deformable.py train \
   --tensorboard \
-  --batch-size 28 \
+  --batch-size 32 \
   --predict-after-train \
   --no-class-balance \
   --epochs 70 \
   --eval-interval 3 \
   --scalar 5 \
-  --canvas-scale-factor 1.05 \
-  --random-expand-noise-std 0.05 \
+  --canvas-scale-factor 1.0 \
+  --random-expand-noise-std 0.0 \
   --dropout 0.1 \
   --label-noise-scale 0.2 \
   --box-noise-scale 0.4 \
-  --lr 1e-4 \
+  --lr 2e-4 \
   --lr-backbone 1e-5 \
   --lr-gamma 0.5 \
   --plateau-patience 6 \
   --plateau-threshold 5e-4 \
   --image-size 720 \
   --num-queries 300 \
-  --checkpoint-dir checkpoints/dn_deformable_digit_100epoch\
-  --tensorboard-dir tensorboard_dn_deformable/digit_100epoch \
-  --output predict_result/pred_dn_deformable_digit_100epoch.json
+  --no-pretrained-checkpoint \
+  --checkpoint-dir checkpoints/dn_deformable_final \
+  --tensorboard-dir tensorboard_dn_deformable/final \
+  --output predict_result/pred_dn_deformable_final.json
 ```
 
 For this homework dataset, start without `--freeze-transformer`.

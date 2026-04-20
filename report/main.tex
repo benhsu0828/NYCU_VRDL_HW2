@@ -105,7 +105,7 @@ In addition, the DN-DETR version fixes several third-party framework arguments i
 \section{Results}
 \label{sec:results}
 
-The experimental results are summarized in \cref{tab:results}. I omit most intermediate figures here and keep only the validation scores for clearer comparison.
+The experimental results are summarized in \cref{tab:results}. I omit most intermediate figures here and keep only the validation scores for clearer comparison. The Baseline with FPN version is with batch max padding but the Baseline with No FPN and No Canvas Offline Aug didn't.
 
 \begin{table}[tb]
     \caption{Validation score comparison for baseline variants (with/without FPN) and DN-DETR under different offline canvas augmentation settings.}
@@ -117,8 +117,7 @@ The experimental results are summarized in \cref{tab:results}. I omit most inter
         Model / Version & Backbone / Setting & Description & Score \\
         \midrule
         \texttt{Baseline (No FPN, No Canvas Offline Aug)} & DETR + ResNet-50 & trained on original train set & 0.28 \\
-        \texttt{Baseline with FPN (No Canvas Offline Aug)} & DETR + ResNet-50 + FPN fusion & trained on original train set & tbd \\
-        \texttt{Baseline with FPN (Canvas Offline Aug)} & DETR + ResNet-50 + FPN fusion & trained on offline canvas-augmented train set & tbd \\
+        \texttt{Baseline with FPN (No Canvas Offline Aug)} & DETR + ResNet-50 + FPN fusion & trained on original train set & 0 \\
         \texttt{DN-DETR (No Canvas Offline Aug)} & DN-Deformable-DETR-R50 & trained on original train set & 0.37 \\
         \texttt{DN-DETR (Canvas Offline Aug)} & DN-Deformable-DETR-R50 & trained on offline canvas-augmented train set & 0.26 \\
         \bottomrule
